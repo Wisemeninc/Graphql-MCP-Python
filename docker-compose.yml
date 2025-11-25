@@ -1,0 +1,38 @@
+services:
+  graphql-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: graphql-mcp-server
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    environment:
+      - GRAPHQL_ENDPOINT=${GRAPHQL_ENDPOINT}
+      - GRAPHQL_AUTH_TOKEN=${GRAPHQL_AUTH_TOKEN:-}
+      - GRAPHQL_HEADERS=${GRAPHQL_HEADERS:-}
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Multiple GraphQL endpoints example
+  # Uncomment and configure as needed
+  
+  # github-graphql:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: github-graphql-mcp
+  #   ports:
+  #     - "8001:8000"
+  #   environment:
+  #     - GRAPHQL_ENDPOINT=https://api.github.com/graphql
+  #     - GRAPHQL_AUTH_TOKEN=${GITHUB_TOKEN}
+  #     - MCP_HOST=0.0.0.0
+  #     - MCP_PORT=8000
+  #   restart: unless-stopped
