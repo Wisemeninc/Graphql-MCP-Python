@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: graphql-mcp
+  labels:
+    app: graphql-mcp-server
+    app.kubernetes.io/name: graphql-mcp-server
+    app.kubernetes.io/version: "1.0.0"

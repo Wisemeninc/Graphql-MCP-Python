@@ -1,0 +1,32 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: graphql-mcp-server
+  namespace: graphql-mcp
+  labels:
+    app: graphql-mcp-server
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    # Uncomment for automatic TLS with cert-manager
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Required for SSE long-lived connections
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  # Uncomment for TLS
+  # tls:
+  #   - hosts:
+  #       - mcp.your-domain.com
+  #     secretName: graphql-mcp-tls
+  rules:
+    - host: mcp.your-domain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: graphql-mcp-server
+                port:
+                  number: 80
