@@ -5,6 +5,41 @@ All notable changes to the GraphQL MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2025-11-25
+
+### Added
+
+#### GitHub OAuth Authentication
+- Optional GitHub OAuth authentication for secure access control
+- `GITHUB_AUTH_ENABLED` environment variable to enable/disable
+- `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` for OAuth app credentials
+- `GITHUB_ALLOWED_USERS` - comma-separated list of allowed GitHub usernames
+- `GITHUB_ALLOWED_ORGS` - comma-separated list of allowed GitHub organizations
+- `AUTH_TOKEN_EXPIRY` - configurable token lifetime (default 24 hours)
+- OAuth endpoints:
+  - `GET /auth/login` - Initiate OAuth flow
+  - `GET /auth/callback` - OAuth callback handler
+  - `GET /auth/status` - Check authentication status
+  - `POST /auth/logout` - Invalidate session
+- Automatic token cleanup for expired sessions
+- CSRF protection via state parameter
+- Comprehensive `GITHUB_OAUTH.md` documentation
+
+### Security
+- Authentication checks on ALL MCP endpoints when enabled:
+  - `POST /` - MCP JSON-RPC endpoint
+  - `GET /` and `GET /sse` - SSE endpoints
+  - `POST /messages` - Session messages
+  - `GET /tools` - Tools listing
+  - `POST /execute` - Direct tool execution
+- Only `/health` and `/auth/*` endpoints remain public
+- Organization membership verification for access control
+- Secure token generation using `secrets` module
+- Token-based session management
+- Returns 401 with auth URL on unauthorized requests
+
+---
+
 ## [1.1.0] - 2025-11-25
 
 ### Added

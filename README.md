@@ -12,6 +12,7 @@ A Model Context Protocol (MCP) server that enables LLMs to interact with GraphQL
 - **Multiple Transports**: Supports both stdio and HTTP/SSE transports
 - **Docker Support**: Run in containers with Docker and Docker Compose
 - **Kubernetes Ready**: Full K8s manifests with HPA, Network Policies, and more
+- **GitHub OAuth**: Optional authentication with user/org-based access control
 
 ## Quick Start with Docker
 
@@ -33,6 +34,8 @@ curl http://localhost:8000/tools
 See [DOCKER_SSE_GUIDE.md](DOCKER_SSE_GUIDE.md) for full Docker and SSE documentation.
 
 See [KUBERNETES_GUIDE.md](KUBERNETES_GUIDE.md) for Kubernetes deployment instructions.
+
+See [GITHUB_OAUTH.md](GITHUB_OAUTH.md) for GitHub OAuth authentication setup.
 
 ## Installation (Without Docker)
 
