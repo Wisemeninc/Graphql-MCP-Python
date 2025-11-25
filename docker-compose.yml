@@ -20,9 +20,25 @@ services:
       retries: 3
       start_period: 10s
 
+  github-starwars:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: github-graphql-mcp
+    ports:
+      - "8001:8001"
+    environment:
+      - GRAPHQL_ENDPOINT=https://swapi-graphql.netlify.app/graphql
+      - GRAPHQL_AUTH_TOKEN=${SW_TOKEN}
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8001
+    restart: unless-stopped
+
+
+
   # Optional: Multiple GraphQL endpoints example
   # Uncomment and configure as needed
-  
+
   # github-graphql:
   #   build:
   #     context: .

@@ -33,9 +33,18 @@ except ImportError:
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with debug support
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
+
+# Set third-party loggers to WARNING to reduce noise
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 # Server info
 SERVER_VERSION = __version__
@@ -55,22 +64,29 @@ def get_graphql_client() -> Client:
     if graphql_client is None:
         endpoint = os.getenv("GRAPHQL_ENDPOINT")
         if not endpoint:
+            logger.error("GRAPHQL_ENDPOINT environment variable is not set")
             raise ValueError("GRAPHQL_ENDPOINT environment variable is required")
+        
+        logger.debug(f"Creating GraphQL client for endpoint: {endpoint}")
         
         headers = {}
         auth_token = os.getenv("GRAPHQL_AUTH_TOKEN")
         if auth_token:
             headers["Authorization"] = f"Bearer {auth_token}"
+            logger.debug("Added Bearer token authentication")
         
         custom_headers = os.getenv("GRAPHQL_HEADERS")
         if custom_headers:
             try:
                 headers.update(json.loads(custom_headers))
+                logger.debug(f"Added custom headers: {list(json.loads(custom_headers).keys())}")
             except json.JSONDecodeError:
                 logger.warning("Invalid GRAPHQL_HEADERS format, skipping")
         
+        logger.debug(f"Final headers (keys only): {list(headers.keys())}")
         transport = AIOHTTPTransport(url=endpoint, headers=headers)
         graphql_client = Client(transport=transport, fetch_schema_from_transport=False)
+        logger.info(f"GraphQL client initialized for: {endpoint}")
     
     return graphql_client
 
@@ -140,11 +156,17 @@ def get_tools() -> list[dict]:
 
 async def handle_introspection() -> dict:
     """Perform GraphQL introspection"""
+    logger.debug("Starting GraphQL introspection")
     client = get_graphql_client()
     introspection_query = get_introspection_query()
     
+    logger.debug("Executing introspection query")
     async with client as session:
         result = await session.execute(gql(introspection_query))
+    
+    type_count = len(result.get("__schema", {}).get("types", []))
+    logger.debug(f"Introspection completed. Found {type_count} types")
+    logger.info("GraphQL introspection executed successfully")
     
     return {
         "query_used": "GraphQL Introspection Query",
@@ -154,14 +176,20 @@ async def handle_introspection() -> dict:
 
 async def handle_get_schema() -> dict:
     """Get GraphQL schema in SDL format"""
+    logger.debug("Starting schema retrieval")
     client = get_graphql_client()
     introspection_query = get_introspection_query()
     
+    logger.debug("Executing introspection query for schema")
     async with client as session:
         result = await session.execute(gql(introspection_query))
     
+    logger.debug("Building client schema from introspection result")
     schema = build_client_schema(result)
     schema_sdl = print_schema(schema)
+    
+    logger.debug(f"Schema SDL generated: {len(schema_sdl)} characters")
+    logger.info("GraphQL schema retrieved successfully")
     
     return {
         "query_used": "GraphQL Introspection Query (converted to SDL)",
@@ -174,14 +202,25 @@ async def handle_query(arguments: dict) -> dict:
     query_str = arguments.get("query", "")
     variables = arguments.get("variables", {})
     
+    logger.debug(f"Query request received")
+    logger.debug(f"Query: {query_str[:200]}{'...' if len(query_str) > 200 else ''}")
+    if variables:
+        logger.debug(f"Variables: {json.dumps(variables)[:200]}")
+    
     if not query_str:
+        logger.warning("Query request missing required 'query' parameter")
         raise ValueError("query parameter is required")
     
     client = get_graphql_client()
     query = gql(query_str)
     
+    logger.debug("Executing GraphQL query")
     async with client as session:
         result = await session.execute(query, variable_values=variables)
+    
+    result_preview = json.dumps(result)[:200] if result else "null"
+    logger.debug(f"Query result preview: {result_preview}{'...' if len(json.dumps(result)) > 200 else ''}")
+    logger.info(f"GraphQL query executed successfully")
     
     return {
         "query_used": query_str,
@@ -195,14 +234,25 @@ async def handle_mutation(arguments: dict) -> dict:
     mutation_str = arguments.get("mutation", "")
     variables = arguments.get("variables", {})
     
+    logger.debug(f"Mutation request received")
+    logger.debug(f"Mutation: {mutation_str[:200]}{'...' if len(mutation_str) > 200 else ''}")
+    if variables:
+        logger.debug(f"Variables: {json.dumps(variables)[:200]}")
+    
     if not mutation_str:
+        logger.warning("Mutation request missing required 'mutation' parameter")
         raise ValueError("mutation parameter is required")
     
     client = get_graphql_client()
     mutation = gql(mutation_str)
     
+    logger.debug("Executing GraphQL mutation")
     async with client as session:
         result = await session.execute(mutation, variable_values=variables)
+    
+    result_preview = json.dumps(result)[:200] if result else "null"
+    logger.debug(f"Mutation result preview: {result_preview}{'...' if len(json.dumps(result)) > 200 else ''}")
+    logger.info(f"GraphQL mutation executed successfully")
     
     return {
         "mutation_used": mutation_str,
@@ -213,18 +263,28 @@ async def handle_mutation(arguments: dict) -> dict:
 
 async def call_tool(name: str, arguments: dict) -> list[dict]:
     """Execute a tool and return result"""
+    logger.info(f"Tool call: {name}")
+    logger.debug(f"Tool arguments: {json.dumps(arguments)[:500] if arguments else 'None'}")
+    
     try:
         if name == "graphql_introspection":
+            logger.debug("Dispatching to introspection handler")
             result = await handle_introspection()
         elif name == "graphql_query":
+            logger.debug("Dispatching to query handler")
             result = await handle_query(arguments)
         elif name == "graphql_mutation":
+            logger.debug("Dispatching to mutation handler")
             result = await handle_mutation(arguments)
         elif name == "graphql_get_schema":
+            logger.debug("Dispatching to schema handler")
             result = await handle_get_schema()
         else:
+            logger.warning(f"Unknown tool requested: {name}")
             return [{"type": "text", "text": f"Unknown tool: {name}"}]
         
+        result_size = len(json.dumps(result))
+        logger.debug(f"Tool {name} completed. Result size: {result_size} bytes")
         return [{"type": "text", "text": json.dumps(result, indent=2)}]
     except Exception as e:
         logger.error(f"Error executing tool {name}: {str(e)}", exc_info=True)
@@ -258,10 +318,15 @@ async def handle_mcp_message(message: dict) -> Optional[dict]:
     params = message.get("params", {})
     msg_id = message.get("id")
     
-    logger.info(f"Handling MCP method: {method}, id: {msg_id}")
+    logger.info(f"MCP request: method={method}, id={msg_id}")
+    logger.debug(f"MCP message params: {json.dumps(params)[:500] if params else 'None'}")
     
     try:
         if method == "initialize":
+            logger.debug("Processing initialize request")
+            client_info = params.get("clientInfo", {})
+            logger.info(f"Client connecting: {client_info.get('name', 'unknown')} v{client_info.get('version', 'unknown')}")
+            
             result = {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {
@@ -272,35 +337,45 @@ async def handle_mcp_message(message: dict) -> Optional[dict]:
                     "version": SERVER_VERSION
                 }
             }
+            logger.debug(f"Sending initialize response: {json.dumps(result)}")
             return create_jsonrpc_response(msg_id, result)
         
         elif method == "notifications/initialized":
             # This is a notification, no response needed
-            logger.info("Client initialized")
+            logger.info("Client initialization complete - session ready")
             return None
         
         elif method == "tools/list":
-            result = {"tools": get_tools()}
+            logger.debug("Processing tools/list request")
+            tools = get_tools()
+            logger.debug(f"Returning {len(tools)} tools")
+            result = {"tools": tools}
             return create_jsonrpc_response(msg_id, result)
         
         elif method == "tools/call":
             tool_name = params.get("name")
             arguments = params.get("arguments", {})
+            logger.info(f"Tool call requested: {tool_name}")
+            logger.debug(f"Tool call arguments: {json.dumps(arguments)[:300]}")
+            
             content = await call_tool(tool_name, arguments)
             result = {"content": content}
+            
+            logger.debug(f"Tool call completed: {tool_name}")
             return create_jsonrpc_response(msg_id, result)
         
         elif method == "ping":
+            logger.debug("Received ping, sending pong")
             return create_jsonrpc_response(msg_id, {})
         
         else:
-            logger.warning(f"Unknown method: {method}")
+            logger.warning(f"Unknown MCP method: {method}")
             if msg_id is not None:
                 return create_jsonrpc_error(msg_id, -32601, f"Method not found: {method}")
             return None
             
     except Exception as e:
-        logger.error(f"Error handling message: {str(e)}", exc_info=True)
+        logger.error(f"Error handling MCP method {method}: {str(e)}", exc_info=True)
         if msg_id is not None:
             return create_jsonrpc_error(msg_id, -32603, str(e))
         return None
@@ -322,9 +397,13 @@ async def mcp_post_endpoint(request: Request) -> Response:
     Main MCP endpoint - handles POST requests with JSON-RPC messages
     This is the Streamable HTTP transport endpoint
     """
+    client_ip = request.client.host if request.client else "unknown"
+    logger.debug(f"POST request from {client_ip}")
+    logger.debug(f"Request headers: {dict(request.headers)}")
+    
     try:
         body = await request.json()
-        logger.info(f"Received MCP POST: {json.dumps(body)[:200]}")
+        logger.info(f"MCP POST received from {client_ip}: {json.dumps(body)[:200]}")
         
         # Handle single message or batch
         if isinstance(body, list):
@@ -361,11 +440,13 @@ async def mcp_sse_endpoint(request: Request) -> EventSourceResponse:
     SSE endpoint for MCP - provides server-to-client streaming
     Used as fallback or for notifications
     """
+    client_ip = request.client.host if request.client else "unknown"
     session_id = str(uuid.uuid4())
     queue: asyncio.Queue = asyncio.Queue()
     sse_connections[session_id] = queue
     
-    logger.info(f"SSE connection established: {session_id}")
+    logger.info(f"SSE connection established: session={session_id}, client={client_ip}")
+    logger.debug(f"Active SSE connections: {len(sse_connections)}")
     
     async def event_generator():
         try:
@@ -495,15 +576,32 @@ def run_server():
     host = os.getenv("MCP_HOST", "0.0.0.0")
     port = int(os.getenv("MCP_PORT", "8000"))
     
-    logger.info(f"Starting GraphQL MCP Server on {host}:{port}")
+    logger.info("=" * 60)
+    logger.info(f"GraphQL MCP Server v{SERVER_VERSION}")
+    logger.info("=" * 60)
+    logger.info(f"Host: {host}")
+    logger.info(f"Port: {port}")
     logger.info(f"GraphQL Endpoint: {os.getenv('GRAPHQL_ENDPOINT', 'Not configured')}")
     logger.info(f"MCP Protocol Version: {PROTOCOL_VERSION}")
+    logger.info(f"Log Level: {LOG_LEVEL}")
+    logger.info("=" * 60)
+    logger.info("Available endpoints:")
+    logger.info("  POST /          - MCP JSON-RPC endpoint")
+    logger.info("  GET  /          - SSE endpoint")
+    logger.info("  GET  /sse       - SSE endpoint (alias)")
+    logger.info("  GET  /health    - Health check")
+    logger.info("  GET  /tools     - List tools")
+    logger.info("  POST /execute   - Execute tool directly")
+    logger.info("=" * 60)
+    
+    # Determine uvicorn log level based on our LOG_LEVEL
+    uvicorn_log_level = "debug" if LOG_LEVEL == "DEBUG" else "info"
     
     uvicorn.run(
         app,
         host=host,
         port=port,
-        log_level="info"
+        log_level=uvicorn_log_level
     )
 
 

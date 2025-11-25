@@ -5,6 +5,37 @@ All notable changes to the GraphQL MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2025-11-25
+
+### Added
+
+#### Debug Logging
+- Configurable `LOG_LEVEL` environment variable (DEBUG, INFO, WARNING, ERROR)
+- Structured log format with timestamps
+- Debug logging for GraphQL client initialization
+- Debug logging for all tool handlers (introspection, query, mutation, schema)
+- MCP message handling logs with client info
+- HTTP endpoint logging with client IP tracking
+- SSE connection management logging
+- Startup banner showing server configuration and available endpoints
+- Silenced noisy third-party loggers (httpx, httpcore, aiohttp)
+
+#### Kubernetes Support
+- Complete `k8s/` directory with production-ready manifests
+- Namespace, ConfigMap, Secret configurations
+- Deployment with security best practices (non-root, read-only fs, dropped capabilities)
+- Service and Ingress with SSE-optimized nginx annotations
+- HorizontalPodAutoscaler for auto-scaling (2-10 replicas)
+- PodDisruptionBudget for high availability
+- NetworkPolicy for security
+- Kustomization for easy deployment
+- Cloud-specific configurations for AWS EKS, GKE, and Azure AKS
+
+### Changed
+- Uvicorn log level now follows `LOG_LEVEL` setting
+
+---
+
 ## [1.0.0] - 2025-11-25
 
 ### Added
