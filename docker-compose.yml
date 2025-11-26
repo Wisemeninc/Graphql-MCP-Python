@@ -10,6 +10,8 @@ services:
       - GRAPHQL_ENDPOINT=${GRAPHQL_ENDPOINT}
       - GRAPHQL_AUTH_TOKEN=${GRAPHQL_AUTH_TOKEN:-}
       - GRAPHQL_HEADERS=${GRAPHQL_HEADERS:-}
+      - SSL_VERIFY=${SSL_VERIFY:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
     restart: unless-stopped
@@ -30,6 +32,8 @@ services:
     environment:
       - GRAPHQL_ENDPOINT=https://swapi-graphql.netlify.app/graphql
       - GRAPHQL_AUTH_TOKEN=${SW_TOKEN}
+      - SSL_VERIFY=${SSL_VERIFY:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8001
     restart: unless-stopped
