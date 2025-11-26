@@ -69,6 +69,11 @@ AUTH_TOKEN_EXPIRY = int(os.getenv("AUTH_TOKEN_EXPIRY", "86400"))  # Default 24 h
 oauth_states: dict[str, dict] = {}  # state -> {created_at, redirect_uri}
 auth_tokens: dict[str, dict] = {}  # token -> {user, orgs, created_at, expires_at}
 
+# SSL/TLS Configuration
+SSL_VERIFY = os.getenv("SSL_VERIFY", "true").lower() != "false"
+if not SSL_VERIFY:
+    logger.warning("⚠️  SSL certificate verification is DISABLED - use only in development!")
+
 # Global GraphQL client
 graphql_client = None
 
@@ -103,9 +108,28 @@ def get_graphql_client() -> Client:
                 logger.warning("Invalid GRAPHQL_HEADERS format, skipping")
         
         logger.debug(f"Final headers (keys only): {list(headers.keys())}")
-        transport = AIOHTTPTransport(url=endpoint, headers=headers)
+        
+        # Configure SSL context
+        ssl_context = None
+        if not SSL_VERIFY:
+            import ssl
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            logger.debug("SSL certificate verification disabled")
+        
+        # Create connector with SSL settings
+        connector = aiohttp.TCPConnector(ssl=ssl_context) if ssl_context else None
+        
+        transport = AIOHTTPTransport(
+            url=endpoint, 
+            headers=headers,
+            client_session_args={"connector": connector} if connector else {}
+        )
         graphql_client = Client(transport=transport, fetch_schema_from_transport=False)
-        logger.info(f"GraphQL client initialized for: {endpoint}")
+        logger.info(f"GraphQL client initialized for: {endpoint} (SSL verify: {SSL_VERIFY})")
+    
+    return graphql_client
     
     return graphql_client
 
