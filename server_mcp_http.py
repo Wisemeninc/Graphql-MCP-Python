@@ -109,27 +109,19 @@ def get_graphql_client() -> Client:
         
         logger.debug(f"Final headers (keys only): {list(headers.keys())}")
         
-        # Configure SSL context
-        ssl_context = None
-        if not SSL_VERIFY:
-            import ssl
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            logger.debug("SSL certificate verification disabled")
+        # Configure SSL - pass False to disable verification entirely
+        ssl_param = None if SSL_VERIFY else False
         
-        # Create connector with SSL settings
-        connector = aiohttp.TCPConnector(ssl=ssl_context) if ssl_context else None
+        if not SSL_VERIFY:
+            logger.warning(f"Creating GraphQL client with SSL verification DISABLED for: {endpoint}")
         
         transport = AIOHTTPTransport(
             url=endpoint, 
             headers=headers,
-            client_session_args={"connector": connector} if connector else {}
+            ssl=ssl_param
         )
         graphql_client = Client(transport=transport, fetch_schema_from_transport=False)
         logger.info(f"GraphQL client initialized for: {endpoint} (SSL verify: {SSL_VERIFY})")
-    
-    return graphql_client
     
     return graphql_client
 
