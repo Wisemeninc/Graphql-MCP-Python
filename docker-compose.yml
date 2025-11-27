@@ -1,41 +1,106 @@
 services:
-  graphql-mcp:
+  # ============================================================================
+  # Traefik Reverse Proxy with Let's Encrypt TLS (Optional)
+  # ============================================================================
+  # Enable by setting TLS_ENABLED=true in .env
+  traefik:
+    image: traefik:v3.2
+    container_name: traefik
+    profiles:
+      - tls
+    command:
+      # API and Dashboard
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Redirect HTTP to HTTPS
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      # Let's Encrypt with Cloudflare DNS challenge
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.delaybeforecheck=10"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      # Use staging server for testing (uncomment for production)
+      # - "--certificatesresolvers.letsencrypt.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+      # Docker provider
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--log.level=${TRAEFIK_LOG_LEVEL:-INFO}"
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - CF_API_EMAIL=${CF_API_EMAIL}
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "letsencrypt:/letsencrypt"
+    labels:
+      # Dashboard
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.dashboard.middlewares=dashboard-auth"
+      - "traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
+    restart: unless-stopped
+
+  # ============================================================================
+  # GraphQL MCP Services
+  # ============================================================================
+  graphql-rick:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: graphql-mcp-server
     ports:
-      - "${MCP_PORT:-8000}:8000"
+      - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"
+    env_file:
+      - .env
     environment:
-      - GRAPHQL_ENDPOINT=${GRAPHQL_ENDPOINT}
-      - GRAPHQL_AUTH_TOKEN=${GRAPHQL_AUTH_TOKEN:-}
-      - GRAPHQL_HEADERS=${GRAPHQL_HEADERS:-}
-      - SSL_VERIFY=${SSL_VERIFY:-true}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MCP_HOST=0.0.0.0
-      - MCP_PORT=8000
+      - MCP_PORT=${DEFAULT_MCP_PORT:-}
+      - GRAPHQL_ENDPOINT=${DEFAULT_GRAPHQL_ENDPOINT:-}
+      - GRAPHQL_AUTH_TOKEN=${DEFAULT_AUTH_TOKEN:-}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.graphql-rick.rule=Host(`rick.${DOMAIN}`)"
+      - "traefik.http.routers.graphql-rick.entrypoints=websecure"
+      - "traefik.http.routers.graphql-rick.tls.certresolver=letsencrypt"
+      - "traefik.http.services.graphql-rick.loadbalancer.server.port=${MCP_PORT:-8000}"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:${MCP_PORT:-8000}/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
-  github-starwars:
+  graphql-starwars:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: github-graphql-mcp
     ports:
-      - "8001:8001"
+      - "${STARWARS_MCP_PORT:-8001}:${STARWARS_MCP_PORT:-8001}"
+    env_file:
+      - .env
     environment:
-      - GRAPHQL_ENDPOINT=https://swapi-graphql.netlify.app/graphql
-      - GRAPHQL_AUTH_TOKEN=${SW_TOKEN}
-      - SSL_VERIFY=${SSL_VERIFY:-true}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MCP_HOST=0.0.0.0
-      - MCP_PORT=8001
+      - MCP_PORT=${STARWARS_MCP_PORT:-8001}
+      - GRAPHQL_ENDPOINT=${STARWARS_GRAPHQL_ENDPOINT:-}
+      - GRAPHQL_AUTH_TOKEN=${STARWARS_AUTH_TOKEN:-}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.graphql-starwars.rule=Host(`starwars.${DOMAIN}`)"
+      - "traefik.http.routers.graphql-starwars.entrypoints=websecure"
+      - "traefik.http.routers.graphql-starwars.tls.certresolver=letsencrypt"
+      - "traefik.http.services.graphql-starwars.loadbalancer.server.port=${STARWARS_MCP_PORT:-8001}"
     restart: unless-stopped
 
   graphql-huginn:
@@ -44,14 +109,21 @@ services:
       dockerfile: Dockerfile
     container_name: huginn-graphql-mcp
     ports:
-      - "8008:8008"
+      - "${HUGINN_MCP_PORT:-8008}:${HUGINN_MCP_PORT:-8008}"
+    env_file:
+      - .env
     environment:
-      - GRAPHQL_ENDPOINT=https://app.local.huginn.energinet.local/graphql
-      - GRAPHQL_AUTH_TOKEN=${HUGINNSW_TOKEN}
-      - SSL_VERIFY=${SSL_VERIFY:-true}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MCP_HOST=0.0.0.0
-      - MCP_PORT=8008
+      - MCP_PORT=${HUGINN_MCP_PORT:-8008}
+      - GRAPHQL_ENDPOINT=${HUGINN_GRAPHQL_ENDPOINT:-}
+      - GRAPHQL_AUTH_TOKEN=${HUGINN_AUTH_TOKEN:-}
+      - SSL_VERIFY=${HUGINN_SSL_VERIFY:-false}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.graphql-huginn.rule=Host(`huginn.${DOMAIN}`)"
+      - "traefik.http.routers.graphql-huginn.entrypoints=websecure"
+      - "traefik.http.routers.graphql-huginn.tls.certresolver=letsencrypt"
+      - "traefik.http.services.graphql-huginn.loadbalancer.server.port=${HUGINN_MCP_PORT:-8008}"
     restart: unless-stopped
 
 
@@ -64,10 +136,21 @@ services:
   #     dockerfile: Dockerfile
   #   container_name: github-graphql-mcp
   #   ports:
-  #     - "8001:8000"
+  #     - "${GITHUB_MCP_PORT:-8002}:${GITHUB_MCP_PORT:-8002}"
+  #   env_file:
+  #     - .env
   #   environment:
-  #     - GRAPHQL_ENDPOINT=https://api.github.com/graphql
-  #     - GRAPHQL_AUTH_TOKEN=${GITHUB_TOKEN}
   #     - MCP_HOST=0.0.0.0
-  #     - MCP_PORT=8000
+  #     - MCP_PORT=${GITHUB_MCP_PORT:-8002}
+  #     - GRAPHQL_ENDPOINT=https://api.github.com/graphql
+  #     - GRAPHQL_AUTH_TOKEN=${GITHUB_TOKEN:-}
+  #   labels:
+  #     - "traefik.enable=true"
+  #     - "traefik.http.routers.github-graphql.rule=Host(`github.${DOMAIN}`)"
+  #     - "traefik.http.routers.github-graphql.entrypoints=websecure"
+  #     - "traefik.http.routers.github-graphql.tls.certresolver=letsencrypt"
+  #     - "traefik.http.services.github-graphql.loadbalancer.server.port=${GITHUB_MCP_PORT:-8002}"
   #   restart: unless-stopped
+
+volumes:
+  letsencrypt:

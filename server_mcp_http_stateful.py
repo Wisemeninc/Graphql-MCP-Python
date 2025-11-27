@@ -68,18 +68,27 @@ logging.getLogger("aiohttp").setLevel(logging.WARNING)
 SERVER_VERSION = __version__
 PROTOCOL_VERSION = MCP_PROTOCOL_VERSION
 
-# GitHub OAuth Configuration
-GITHUB_AUTH_ENABLED = os.getenv("GITHUB_AUTH_ENABLED", "false").lower() == "true"
-GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
-GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
-GITHUB_ALLOWED_USERS = [u.strip() for u in os.getenv("GITHUB_ALLOWED_USERS", "").split(",") if u.strip()]
-GITHUB_ALLOWED_ORGS = [o.strip() for o in os.getenv("GITHUB_ALLOWED_ORGS", "").split(",") if o.strip()]
-GITHUB_OAUTH_CALLBACK_URL = os.getenv("GITHUB_OAUTH_CALLBACK_URL", "")
-AUTH_TOKEN_EXPIRY = int(os.getenv("AUTH_TOKEN_EXPIRY", "86400"))
+# OAuth 2.1 Configuration
+OAUTH_ENABLED = os.getenv("OAUTH_ENABLED", os.getenv("GITHUB_AUTH_ENABLED", "false")).lower() == "true"
+OAUTH_PROVIDER = os.getenv("OAUTH_PROVIDER", "github")
 
-# Token storage (in production, use Redis or database)
-oauth_states: dict[str, dict] = {}
-auth_tokens: dict[str, dict] = {}
+# Import OAuth 2.1 module if enabled
+if OAUTH_ENABLED:
+    try:
+        from oauth21 import (
+            get_oauth_client, get_oauth_config, token_store,
+            validate_bearer_token, OAuth21Client, TokenSet
+        )
+        oauth_client = get_oauth_client(OAUTH_PROVIDER)
+        if oauth_client:
+            logger.info(f"OAuth 2.1 enabled with provider: {OAUTH_PROVIDER}")
+        else:
+            logger.warning(f"OAuth 2.1 enabled but provider '{OAUTH_PROVIDER}' not configured")
+            OAUTH_ENABLED = False
+    except ImportError as e:
+        logger.warning(f"OAuth 2.1 module not available: {e}")
+        OAUTH_ENABLED = False
+        oauth_client = None
 
 # SSL Configuration
 SSL_VERIFY = os.getenv("SSL_VERIFY", "true").lower() != "false"
@@ -248,240 +257,253 @@ async def handle_epoch_to_readable(
 
 
 # ============================================================================
-# GitHub OAuth Functions
-# ============================================================================
-
-def generate_oauth_state() -> str:
-    return secrets.token_urlsafe(32)
-
-
-def generate_auth_token() -> str:
-    return secrets.token_urlsafe(64)
-
-
-def cleanup_expired_tokens():
-    current_time = time.time()
-    
-    expired_states = [s for s, data in oauth_states.items() 
-                      if current_time - data["created_at"] > 300]
-    for state in expired_states:
-        oauth_states.pop(state, None)
-    
-    expired_tokens = [t for t, data in auth_tokens.items() 
-                      if current_time > data["expires_at"]]
-    for token in expired_tokens:
-        auth_tokens.pop(token, None)
-
-
-def validate_auth_token(token: str) -> Optional[dict]:
-    cleanup_expired_tokens()
-    
-    if not token:
-        return None
-    
-    if token.startswith("Bearer "):
-        token = token[7:]
-    
-    token_data = auth_tokens.get(token)
-    if not token_data:
-        return None
-    
-    if time.time() > token_data["expires_at"]:
-        auth_tokens.pop(token, None)
-        return None
-    
-    return token_data
-
-
-def is_user_authorized(user_data: dict) -> bool:
-    username = user_data.get("user", "")
-    user_orgs = user_data.get("orgs", [])
-    
-    if not GITHUB_ALLOWED_USERS and not GITHUB_ALLOWED_ORGS:
-        return True
-    
-    if username in GITHUB_ALLOWED_USERS:
-        return True
-    
-    for org in user_orgs:
-        if org in GITHUB_ALLOWED_ORGS:
-            return True
-    
-    return False
-
-
-async def fetch_github_user(access_token: str) -> Optional[dict]:
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json"
-            }
-            
-            async with session.get("https://api.github.com/user", headers=headers) as resp:
-                if resp.status != 200:
-                    return None
-                user_info = await resp.json()
-            
-            async with session.get("https://api.github.com/user/orgs", headers=headers) as resp:
-                orgs = [org["login"] for org in await resp.json()] if resp.status == 200 else []
-            
-            return {
-                "login": user_info.get("login"),
-                "id": user_info.get("id"),
-                "name": user_info.get("name"),
-                "email": user_info.get("email"),
-                "orgs": orgs
-            }
-    except Exception as e:
-        logger.error(f"Error fetching GitHub user: {e}")
-        return None
-
-
-async def exchange_code_for_token(code: str) -> Optional[str]:
-    try:
-        async with aiohttp.ClientSession() as session:
-            data = {
-                "client_id": GITHUB_CLIENT_ID,
-                "client_secret": GITHUB_CLIENT_SECRET,
-                "code": code
-            }
-            headers = {"Accept": "application/json"}
-            
-            async with session.post(
-                "https://github.com/login/oauth/access_token",
-                data=data,
-                headers=headers
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                result = await resp.json()
-                if "error" in result:
-                    return None
-                return result.get("access_token")
-    except Exception as e:
-        logger.error(f"Error exchanging OAuth code: {e}")
-        return None
-
-
-# ============================================================================
-# OAuth HTTP Endpoints
+# OAuth 2.1 HTTP Endpoints
 # ============================================================================
 
 async def auth_login(request: Request) -> Response:
-    if not GITHUB_AUTH_ENABLED:
-        return JSONResponse({"error": "GitHub authentication is not enabled"}, status_code=400)
+    """
+    Initiate OAuth 2.1 authorization flow with PKCE.
     
-    if not GITHUB_CLIENT_ID:
-        return JSONResponse({"error": "GitHub OAuth not configured"}, status_code=500)
+    Query params:
+        redirect_uri: Optional URI to redirect user after authentication
+        provider: OAuth provider (default: from OAUTH_PROVIDER env var)
+    """
+    if not OAUTH_ENABLED:
+        return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
     
-    state = generate_oauth_state()
-    redirect_uri = request.query_params.get("redirect_uri", "")
+    provider = request.query_params.get("provider", OAUTH_PROVIDER)
+    client = get_oauth_client(provider)
     
-    oauth_states[state] = {
-        "created_at": time.time(),
-        "redirect_uri": redirect_uri
-    }
+    if not client:
+        return JSONResponse({"error": f"OAuth provider '{provider}' not configured"}, status_code=500)
     
-    callback_url = GITHUB_OAUTH_CALLBACK_URL or str(request.url_for("auth_callback"))
+    # Get callback URL
+    callback_url = client.config.redirect_uri or str(request.url_for("auth_callback"))
+    client_redirect = request.query_params.get("redirect_uri", "")
     
-    from urllib.parse import urlencode
-    params = {
-        "client_id": GITHUB_CLIENT_ID,
-        "redirect_uri": callback_url,
-        "scope": "read:user read:org",
-        "state": state
-    }
+    # Create authorization URL with PKCE
+    auth_url, auth_request = client.create_authorization_url(
+        redirect_uri=callback_url,
+        client_redirect_uri=client_redirect
+    )
     
-    github_url = f"https://github.com/login/oauth/authorize?{urlencode(params)}"
-    return RedirectResponse(url=github_url)
+    # Store the auth request (includes PKCE verifier)
+    token_store.store_auth_request(auth_request)
+    
+    logger.debug(f"Redirecting to OAuth provider: {provider}")
+    return RedirectResponse(url=auth_url)
 
 
 async def auth_callback(request: Request) -> Response:
-    if not GITHUB_AUTH_ENABLED:
-        return JSONResponse({"error": "GitHub authentication is not enabled"}, status_code=400)
+    """
+    OAuth 2.1 callback endpoint - exchanges code for tokens using PKCE.
+    """
+    if not OAUTH_ENABLED:
+        return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
     
     code = request.query_params.get("code")
     state = request.query_params.get("state")
+    error = request.query_params.get("error")
+    
+    if error:
+        error_description = request.query_params.get("error_description", "Unknown error")
+        logger.error(f"OAuth error: {error} - {error_description}")
+        return JSONResponse({"error": error, "description": error_description}, status_code=400)
     
     if not code or not state:
-        return JSONResponse({"error": "Missing code or state"}, status_code=400)
+        return JSONResponse({"error": "Missing code or state parameter"}, status_code=400)
     
-    state_data = oauth_states.pop(state, None)
-    if not state_data:
-        return JSONResponse({"error": "Invalid or expired state"}, status_code=400)
+    # Retrieve the auth request (contains PKCE verifier)
+    auth_request = token_store.get_auth_request(state)
+    if not auth_request:
+        return JSONResponse({"error": "Invalid or expired state - please try again"}, status_code=400)
     
-    access_token = await exchange_code_for_token(code)
-    if not access_token:
-        return JSONResponse({"error": "Failed to exchange code"}, status_code=400)
+    # Get the OAuth client for this provider
+    client = get_oauth_client(auth_request.provider)
+    if not client:
+        return JSONResponse({"error": "OAuth provider not found"}, status_code=500)
     
-    user_info = await fetch_github_user(access_token)
-    if not user_info:
-        return JSONResponse({"error": "Failed to fetch user info"}, status_code=400)
+    # Exchange code for tokens (with PKCE verifier)
+    token_set = await client.exchange_code(code, auth_request)
+    if not token_set:
+        return JSONResponse({"error": "Failed to exchange authorization code"}, status_code=400)
     
-    temp_user_data = {"user": user_info["login"], "orgs": user_info["orgs"]}
-    if not is_user_authorized(temp_user_data):
+    # Check authorization
+    if not client.is_user_authorized(token_set):
+        logger.warning(f"Unauthorized user attempted login: {token_set.username}")
         return JSONResponse({
             "error": "Forbidden",
-            "message": f"User {user_info['login']} is not authorized"
+            "message": f"User {token_set.username} is not authorized to access this server"
         }, status_code=403)
     
-    auth_token = generate_auth_token()
-    expires_at = time.time() + AUTH_TOKEN_EXPIRY
+    # Store the token
+    token_store.store_token(token_set)
     
-    auth_tokens[auth_token] = {
-        "user": user_info["login"],
-        "user_id": user_info["id"],
-        "name": user_info["name"],
-        "email": user_info["email"],
-        "orgs": user_info["orgs"],
-        "created_at": time.time(),
-        "expires_at": expires_at
-    }
+    logger.info(f"User {token_set.username} authenticated successfully via {auth_request.provider}")
     
-    logger.info(f"User {user_info['login']} authenticated successfully")
-    
-    redirect_uri = state_data.get("redirect_uri")
-    if redirect_uri:
-        return RedirectResponse(url=f"{redirect_uri}#token={auth_token}")
+    # Redirect with token or return JSON
+    if auth_request.client_redirect_uri:
+        # Fragment-based redirect (more secure than query param)
+        return RedirectResponse(
+            url=f"{auth_request.client_redirect_uri}#access_token={token_set.access_token}&token_type=Bearer&expires_in={int(token_set.expires_at - time.time())}"
+        )
     
     return JSONResponse({
         "success": True,
-        "token": auth_token,
-        "user": user_info["login"],
-        "expires_in": AUTH_TOKEN_EXPIRY
+        "access_token": token_set.access_token,
+        "token_type": "Bearer",
+        "expires_in": int(token_set.expires_at - time.time()),
+        "refresh_token": token_set.refresh_token,
+        "user": token_set.username,
+        "scope": token_set.scope
     })
 
 
+async def auth_refresh(request: Request) -> JSONResponse:
+    """
+    Refresh access token using refresh token.
+    OAuth 2.1 implements refresh token rotation for security.
+    """
+    if not OAUTH_ENABLED:
+        return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
+    
+    try:
+        body = await request.json()
+        refresh_token = body.get("refresh_token")
+    except Exception:
+        return JSONResponse({"error": "Invalid request body"}, status_code=400)
+    
+    if not refresh_token:
+        return JSONResponse({"error": "refresh_token is required"}, status_code=400)
+    
+    # Get existing token to find provider
+    old_token_set = token_store.get_token_by_refresh(refresh_token)
+    if not old_token_set:
+        return JSONResponse({"error": "Invalid refresh token"}, status_code=401)
+    
+    client = get_oauth_client(old_token_set.provider)
+    if not client:
+        return JSONResponse({"error": "OAuth provider not found"}, status_code=500)
+    
+    # Refresh tokens (with rotation)
+    new_token_set = await client.refresh_tokens(refresh_token)
+    if not new_token_set:
+        return JSONResponse({"error": "Failed to refresh token"}, status_code=401)
+    
+    # Rotate: invalidate old, store new
+    token_store.rotate_refresh_token(refresh_token, new_token_set)
+    
+    logger.debug(f"Tokens refreshed for user {new_token_set.username}")
+    
+    return JSONResponse({
+        "access_token": new_token_set.access_token,
+        "token_type": "Bearer",
+        "expires_in": int(new_token_set.expires_at - time.time()),
+        "refresh_token": new_token_set.refresh_token,
+        "scope": new_token_set.scope
+    })
+
+
+async def auth_revoke(request: Request) -> JSONResponse:
+    """
+    Revoke an access or refresh token.
+    """
+    if not OAUTH_ENABLED:
+        return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
+    
+    try:
+        body = await request.json()
+        token = body.get("token")
+    except Exception:
+        # Also accept token from Authorization header
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+        else:
+            return JSONResponse({"error": "Token required"}, status_code=400)
+    
+    if not token:
+        return JSONResponse({"error": "token is required"}, status_code=400)
+    
+    # Get token data to find provider
+    token_set = token_store.get_token(token) or token_store.get_token_by_refresh(token)
+    
+    if token_set:
+        client = get_oauth_client(token_set.provider)
+        if client:
+            await client.revoke_token(token)
+    else:
+        # Still try to revoke locally
+        token_store.revoke_token(token)
+    
+    return JSONResponse({"success": True, "message": "Token revoked"})
+
+
 async def auth_status(request: Request) -> JSONResponse:
-    if not GITHUB_AUTH_ENABLED:
-        return JSONResponse({"auth_enabled": False})
+    """
+    Check authentication status and token validity.
+    """
+    if not OAUTH_ENABLED:
+        return JSONResponse({
+            "auth_enabled": False,
+            "oauth_version": "2.1"
+        })
     
     auth_header = request.headers.get("Authorization", "")
-    token_data = validate_auth_token(auth_header)
+    token_set = validate_bearer_token(auth_header)
     
-    if token_data:
+    if token_set:
         return JSONResponse({
             "auth_enabled": True,
+            "oauth_version": "2.1",
             "authenticated": True,
-            "user": token_data.get("user"),
-            "expires_at": token_data.get("expires_at")
+            "provider": token_set.provider,
+            "user": token_set.username,
+            "email": token_set.email,
+            "expires_at": token_set.expires_at,
+            "expires_in": int(token_set.expires_at - time.time()),
+            "scope": token_set.scope
         })
     
     return JSONResponse({
         "auth_enabled": True,
+        "oauth_version": "2.1",
         "authenticated": False,
-        "login_url": "/auth/login"
+        "login_url": "/auth/login",
+        "providers": [OAUTH_PROVIDER]
+    })
+
+
+async def auth_userinfo(request: Request) -> JSONResponse:
+    """
+    Get current user information (OpenID Connect userinfo endpoint style).
+    """
+    if not OAUTH_ENABLED:
+        return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
+    
+    auth_header = request.headers.get("Authorization", "")
+    token_set = validate_bearer_token(auth_header)
+    
+    if not token_set:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    return JSONResponse({
+        "sub": token_set.user_id,
+        "preferred_username": token_set.username,
+        "email": token_set.email,
+        "groups": token_set.groups
     })
 
 
 async def auth_logout(request: Request) -> JSONResponse:
+    """
+    Logout - revoke current token.
+    """
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
-        if token in auth_tokens:
-            auth_tokens.pop(token, None)
-            return JSONResponse({"success": True, "message": "Logged out successfully"})
+        token_store.revoke_token(token)
+        return JSONResponse({"success": True, "message": "Logged out successfully"})
     
     return JSONResponse({"success": True, "message": "No active session"})
 
@@ -496,7 +518,8 @@ async def health_check(request: Request) -> JSONResponse:
         "server": SERVER_NAME,
         "version": SERVER_VERSION,
         "stateful": True,
-        "auth_enabled": GITHUB_AUTH_ENABLED
+        "auth_enabled": OAUTH_ENABLED,
+        "oauth_version": "2.1" if OAUTH_ENABLED else None
     })
 
 
@@ -689,14 +712,15 @@ class AuthenticatedMCPHandler:
         self.session_manager = session_manager
     
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if GITHUB_AUTH_ENABLED:
+        if OAUTH_ENABLED:
             # Extract Authorization header
             headers = dict(scope.get("headers", []))
             auth_header = headers.get(b"authorization", b"").decode()
             
-            token_data = validate_auth_token(auth_header)
+            # Validate token using OAuth 2.1 module
+            token_set = validate_bearer_token(auth_header)
             
-            if not token_data:
+            if not token_set:
                 response = JSONResponse(
                     {"error": "Unauthorized", "login_url": "/auth/login"},
                     status_code=401
@@ -704,7 +728,8 @@ class AuthenticatedMCPHandler:
                 await response(scope, receive, send)
                 return
             
-            if not is_user_authorized(token_data):
+            # Check authorization using OAuth 2.1 client
+            if oauth_client and not oauth_client.is_user_authorized(token_set):
                 response = JSONResponse(
                     {"error": "Forbidden", "message": "User not authorized"},
                     status_code=403
@@ -806,7 +831,7 @@ def run_server():
     logger.info(f"MCP Protocol Version: {PROTOCOL_VERSION}")
     logger.info(f"Log Level: {LOG_LEVEL}")
     logger.info(f"SSL Verify: {SSL_VERIFY}")
-    logger.info(f"GitHub Auth: {'Enabled' if GITHUB_AUTH_ENABLED else 'Disabled'}")
+    logger.info(f"OAuth 2.1: {'Enabled (' + OAUTH_PROVIDER + ')' if OAUTH_ENABLED else 'Disabled'}")
     logger.info("=" * 60)
     logger.info("Session Management: StreamableHTTPSessionManager")
     logger.info("Resumability: Enabled (InMemoryEventStore)")
@@ -816,7 +841,7 @@ def run_server():
     logger.info("  /health - Health check")
     logger.info("  /tools  - List available tools")
     logger.info("  /execute - Direct tool execution")
-    if GITHUB_AUTH_ENABLED:
+    if OAUTH_ENABLED:
         logger.info("  /auth/* - OAuth endpoints")
     logger.info("=" * 60)
     
