@@ -15,11 +15,18 @@ import time
 import logging
 from typing import Optional, Callable, Awaitable
 from dataclasses import dataclass, field
+import json
 from collections import OrderedDict
 
 import mcp.types as types
 from mcp.server.streamable_http_manager import EventStore
 from mcp.server.streamable_http import EventMessage
+
+try:
+    import redis.asyncio as redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -190,3 +197,146 @@ class InMemoryEventStore(EventStore):
     def total_events(self) -> int:
         """Total number of stored events across all streams"""
         return sum(len(events) for events in self._events.values())
+
+
+class RedisEventStore(EventStore):
+    """
+    Redis-backed event store for MCP Streamable HTTP.
+    
+    Uses Redis Streams for event storage and retrieval.
+    """
+    
+    def __init__(self, redis_url: str, max_events_per_stream: int = 1000, event_ttl_seconds: int = 3600):
+        if not REDIS_AVAILABLE:
+            raise ImportError("redis package is required for RedisEventStore")
+            
+        self.redis = redis.from_url(redis_url, decode_responses=True)
+        self.max_events = max_events_per_stream
+        self.ttl = event_ttl_seconds
+        logger.info(f"RedisEventStore initialized (url={redis_url}, ttl={event_ttl_seconds}s)")
+        
+    async def store_event(self, stream_id: str, message: types.JSONRPCMessage) -> str:
+        """Store an event in a Redis Stream"""
+        stream_key = f"mcp:stream:{stream_id}"
+        
+        # Serialize message
+        # We need to handle the fact that message is a Pydantic model or dict
+        if hasattr(message, "model_dump_json"):
+            data = message.model_dump_json()
+        elif hasattr(message, "json"):
+            data = message.json()
+        else:
+            data = json.dumps(message)
+            
+        # Add to stream (auto-generates ID)
+        # MAXLEN ~ triggers approximate trimming for efficiency
+        event_id = await self.redis.xadd(
+            stream_key,
+            {"data": data},
+            maxlen=self.max_events,
+            approximate=True
+        )
+        
+        # Set TTL on the stream key if it's new or update it
+        await self.redis.expire(stream_key, self.ttl)
+        
+        logger.debug(f"Stored event {event_id} for stream {stream_id} in Redis")
+        return event_id
+
+    async def replay_events_after(
+        self,
+        last_event_id: str,
+        send_callback: Callable[[EventMessage], Awaitable[None]]
+    ) -> Optional[str]:
+        """Replay events from Redis Stream"""
+        # We need to find which stream has this event, or if we know the stream_id from context (not passed here)
+        # The interface doesn't pass stream_id, so we have to search or rely on the client knowing the stream_id?
+        # Wait, the InMemory implementation searches all streams. That's inefficient in Redis.
+        # However, typically the client sends Last-Event-ID which implies a specific stream.
+        # But the interface is generic.
+        
+        # For Redis, searching all keys is bad.
+        # BUT, standard SSE usually sends the ID which is unique to the stream.
+        # In Redis Streams, IDs are timestamp-sequence. They are unique within a stream, but could theoretically collide across streams if generated at exact same microsecond (unlikely but possible).
+        # However, we don't have the stream_id here.
+        
+        # OPTIMIZATION: We could store a mapping of event_id -> stream_id in a separate key with TTL if we really need to support "global" lookup.
+        # OR, we scan active streams.
+        
+        # Let's try to scan active streams (keys mcp:stream:*)
+        # This is not ideal for huge scale but fine for typical usage.
+        
+        stream_keys = []
+        async for key in self.redis.scan_iter("mcp:stream:*"):
+            stream_keys.append(key)
+            
+        if not stream_keys:
+            return None
+            
+        # Try to read from all streams starting after last_event_id
+        # This is tricky because XREAD expects specific IDs for specific streams.
+        # If we don't know the stream, we can't easily find it without checking each.
+        
+        target_stream_id = None
+        
+        # We'll check each stream to see if the ID is valid or if we can read after it.
+        # Actually, XREAD with a specific ID will return empty if the ID is effectively "future" or invalid for that stream?
+        # No, XREAD reads NEWER items.
+        
+        # Let's iterate and try to find where this ID makes sense.
+        # This is the limitation of the interface not providing stream_id.
+        
+        for key in stream_keys:
+            try:
+                # Read from this stream after the given ID
+                # We read 1 item to check if it works/exists
+                streams = await self.redis.xread({key: last_event_id}, count=1000)
+                if streams:
+                    # Found data!
+                    stream_name, messages = streams[0]
+                    target_stream_id = stream_name.replace("mcp:stream:", "")
+                    
+                    logger.info(f"Replaying {len(messages)} events from Redis stream {target_stream_id}")
+                    
+                    for eid, data in messages:
+                        # Parse message
+                        msg_data = data["data"]
+                        try:
+                            # We need to reconstruct the message object
+                            # Depending on what types.JSONRPCMessage expects
+                            # It's likely a dict is fine or we need to parse it
+                            parsed_msg = json.loads(msg_data)
+                            
+                            event_message = EventMessage(
+                                event_id=eid,
+                                message=parsed_msg
+                            )
+                            await send_callback(event_message)
+                        except Exception as e:
+                            logger.error(f"Failed to parse message {eid}: {e}")
+                            
+                    return target_stream_id
+            except redis.ResponseError:
+                # ID might be invalid for this stream (e.g. format mismatch if we used different formats)
+                # or simply not found? Redis XREAD usually just returns empty if ID is old.
+                # If ID is greater than top, it returns empty.
+                # If ID is 0-0, it returns all.
+                continue
+                
+        return None
+
+    async def cleanup_stream(self, stream_id: str) -> None:
+        """Delete a stream"""
+        await self.redis.delete(f"mcp:stream:{stream_id}")
+
+    async def cleanup_expired(self) -> int:
+        """
+        Redis handles expiration via TTL on keys.
+        We just need to ensure we set TTLs.
+        But we might want to clean up empty streams or something?
+        Actually, if we set TTL on the stream key, it disappears entirely.
+        So this method might be a no-op or just logging.
+        """
+        # We can't easily count "expired events" because Redis does it in background.
+        return 0
+

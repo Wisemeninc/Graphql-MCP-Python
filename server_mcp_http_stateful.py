@@ -38,7 +38,7 @@ from graphql import get_introspection_query, build_client_schema, print_schema
 from dotenv import load_dotenv
 import uvicorn
 
-from event_store import InMemoryEventStore
+from event_store import InMemoryEventStore, RedisEventStore
 
 # Import version info
 try:
@@ -752,10 +752,33 @@ def create_app() -> Starlette:
     mcp_server = create_mcp_server()
     
     # Create event store for resumability
-    event_store = InMemoryEventStore(
-        max_events_per_stream=1000,
-        event_ttl_seconds=3600
-    )
+    # Create event store for resumability
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            event_store = RedisEventStore(
+                redis_url=redis_url,
+                max_events_per_stream=1000,
+                event_ttl_seconds=3600
+            )
+            logger.info(f"Using RedisEventStore connected to {redis_url}")
+        except ImportError:
+            logger.warning("Redis configured but 'redis' package not installed. Falling back to InMemoryEventStore.")
+            event_store = InMemoryEventStore(
+                max_events_per_stream=1000,
+                event_ttl_seconds=3600
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize RedisEventStore: {e}. Falling back to InMemoryEventStore.")
+            event_store = InMemoryEventStore(
+                max_events_per_stream=1000,
+                event_ttl_seconds=3600
+            )
+    else:
+        event_store = InMemoryEventStore(
+            max_events_per_stream=1000,
+            event_ttl_seconds=3600
+        )
     
     # Create session manager
     session_manager = StreamableHTTPSessionManager(

@@ -51,6 +51,23 @@ services:
     restart: unless-stopped
 
   # ============================================================================
+  # Redis for Event Store
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================================
   # GraphQL MCP Services
   # ============================================================================
   graphql-rick-mcp:
@@ -67,6 +84,10 @@ services:
       - MCP_PORT=${DEFAULT_MCP_PORT:-}
       - GRAPHQL_ENDPOINT=${DEFAULT_GRAPHQL_ENDPOINT:-}
       - GRAPHQL_AUTH_TOKEN=${DEFAULT_AUTH_TOKEN:-}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.graphql-rick.rule=Host(`rick.${DOMAIN}`)"
@@ -154,3 +175,4 @@ services:
 
 volumes:
   letsencrypt:
+  redis_data:

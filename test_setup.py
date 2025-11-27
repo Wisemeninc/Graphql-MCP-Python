@@ -77,7 +77,7 @@ def check_files():
     
     files = [
         ("server.py", "Main server (stdio)"),
-        ("server_http.py", "HTTP/SSE server"),
+        ("server_mcp_http_stateful.py", "HTTP/SSE server"),
         ("requirements.txt", "Dependencies"),
         (".env.example", "Environment template"),
     ]
@@ -124,7 +124,7 @@ def main():
         print("✓ Setup verification complete! Everything looks good.")
         print("\nYou can now start the server:")
         print("  - Stdio mode: python server.py")
-        print("  - HTTP/SSE mode: python server_http.py")
+        print("  - HTTP/SSE mode: python server_mcp_http_stateful.py")
     else:
         print("⚠️  Setup incomplete. Please address the issues above.")
         sys.exit(1)

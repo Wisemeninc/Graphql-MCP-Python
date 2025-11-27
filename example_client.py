@@ -165,6 +165,6 @@ if __name__ == "__main__":
     # asyncio.run(example_http_client())
     
     print("\nTo test with the HTTP server:")
-    print("1. Start the server: python server_http.py")
+    print("1. Start the server: python server_mcp_http_stateful.py")
     print("2. Run this script with HTTP client enabled")
     print("3. Or use curl commands from README.md")

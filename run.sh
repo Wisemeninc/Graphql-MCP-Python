@@ -30,7 +30,7 @@ case $MODE in
         ;;
     http|sse)
         echo "Starting GraphQL MCP Server in HTTP/SSE mode..."
-        python server_http.py
+        python server_mcp_http_stateful.py
         ;;
     test)
         echo "Running setup verification..."
