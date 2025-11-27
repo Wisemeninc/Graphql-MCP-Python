@@ -23,8 +23,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY server.py .
-COPY server_http.py .
-COPY server_mcp_http.py .
 COPY server_mcp_http_stateful.py .
 COPY event_store.py .
 COPY version.py .

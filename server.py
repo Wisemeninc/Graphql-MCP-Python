@@ -12,7 +12,6 @@ from gql.transport.aiohttp import AIOHTTPTransport
 from graphql import get_introspection_query, build_client_schema, print_schema
 from mcp.server import Server
 from mcp.types import Tool, TextContent
-import mcp.server.stdio
 from dotenv import load_dotenv
 
 # Import version info

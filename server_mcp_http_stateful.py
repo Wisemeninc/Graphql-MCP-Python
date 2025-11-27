@@ -22,7 +22,6 @@ import secrets
 from typing import Any, Optional
 from collections.abc import AsyncIterator
 
-import anyio
 import aiohttp
 import mcp.types as types
 from mcp.server.lowlevel import Server
