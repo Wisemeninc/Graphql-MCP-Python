@@ -542,8 +542,81 @@ def get_tools() -> list[dict]:
                 "properties": {},
                 "required": []
             }
+        },
+        {
+            "name": "epoch_to_readable",
+            "description": "Convert Unix epoch timestamp to human-readable date/time format",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "epoch": {
+                        "type": "number",
+                        "description": "Unix epoch timestamp (seconds since January 1, 1970)"
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Optional strftime format string (default: '%Y-%m-%d %H:%M:%S UTC')",
+                        "default": "%Y-%m-%d %H:%M:%S UTC"
+                    },
+                    "timezone": {
+                        "type": "string",
+                        "description": "Optional timezone name (e.g., 'US/Eastern', 'Europe/London'). Defaults to UTC.",
+                        "default": "UTC"
+                    }
+                },
+                "required": ["epoch"]
+            }
         }
     ]
+
+
+async def handle_epoch_to_readable(epoch: float, format_str: str = "%Y-%m-%d %H:%M:%S UTC", timezone: str = "UTC") -> dict:
+    """Convert epoch timestamp to readable format"""
+    try:
+        # Convert epoch to struct_time in UTC
+        utc_time = time.gmtime(epoch)
+        
+        # Format the time
+        if timezone == "UTC":
+            readable = time.strftime(format_str, utc_time)
+        else:
+            # For non-UTC timezones, use localtime with TZ environment variable
+            import os
+            original_tz = os.environ.get("TZ")
+            try:
+                os.environ["TZ"] = timezone
+                time.tzset()
+                local_time = time.localtime(epoch)
+                # Adjust format string if it contains UTC but we're not in UTC
+                adjusted_format = format_str.replace(" UTC", f" {timezone}").replace("UTC", timezone)
+                readable = time.strftime(adjusted_format, local_time)
+            finally:
+                # Restore original timezone
+                if original_tz:
+                    os.environ["TZ"] = original_tz
+                else:
+                    os.environ.pop("TZ", None)
+                time.tzset()
+        
+        return {
+            "epoch": epoch,
+            "readable": readable,
+            "iso8601": time.strftime("%Y-%m-%dT%H:%M:%SZ", utc_time),
+            "timezone": timezone,
+            "components": {
+                "year": utc_time.tm_year,
+                "month": utc_time.tm_mon,
+                "day": utc_time.tm_mday,
+                "hour": utc_time.tm_hour,
+                "minute": utc_time.tm_min,
+                "second": utc_time.tm_sec,
+                "weekday": time.strftime("%A", utc_time),
+                "day_of_year": utc_time.tm_yday
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error converting epoch: {e}")
+        raise ValueError(f"Failed to convert epoch timestamp: {str(e)}")
 
 
 async def handle_introspection() -> dict:
@@ -671,6 +744,14 @@ async def call_tool(name: str, arguments: dict) -> list[dict]:
         elif name == "graphql_get_schema":
             logger.debug("Dispatching to schema handler")
             result = await handle_get_schema()
+        elif name == "epoch_to_readable":
+            logger.debug("Dispatching to epoch converter handler")
+            epoch = arguments.get("epoch")
+            if epoch is None:
+                raise ValueError("epoch parameter is required")
+            format_str = arguments.get("format", "%Y-%m-%d %H:%M:%S UTC")
+            timezone = arguments.get("timezone", "UTC")
+            result = await handle_epoch_to_readable(epoch, format_str, timezone)
         else:
             logger.warning(f"Unknown tool requested: {name}")
             return [{"type": "text", "text": f"Unknown tool: {name}"}]
