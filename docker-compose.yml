@@ -53,11 +53,11 @@ services:
   # ============================================================================
   # GraphQL MCP Services
   # ============================================================================
-  graphql-rick:
+  graphql-rick-mcp:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: graphql-mcp-server
+    container_name: graphql-rick-mcp
     ports:
       - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"
     env_file:
@@ -81,11 +81,11 @@ services:
       retries: 3
       start_period: 10s
 
-  graphql-starwars:
+  graphql-starwars-mcp:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: github-graphql-mcp
+    container_name: graphql-starwars-mcp
     ports:
       - "${STARWARS_MCP_PORT:-8001}:${STARWARS_MCP_PORT:-8001}"
     env_file:
@@ -103,7 +103,7 @@ services:
       - "traefik.http.services.graphql-starwars.loadbalancer.server.port=${STARWARS_MCP_PORT:-8001}"
     restart: unless-stopped
 
-  graphql-huginn:
+  graphql-huginn-mcp:
     build:
       context: .
       dockerfile: Dockerfile
