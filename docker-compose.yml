@@ -116,6 +116,10 @@ services:
       - MCP_PORT=${STARWARS_MCP_PORT:-8001}
       - GRAPHQL_ENDPOINT=${STARWARS_GRAPHQL_ENDPOINT:-}
       - GRAPHQL_AUTH_TOKEN=${STARWARS_AUTH_TOKEN:-}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.graphql-starwars.rule=Host(`starwars.${DOMAIN}`)"
@@ -139,6 +143,10 @@ services:
       - GRAPHQL_ENDPOINT=${HUGINN_GRAPHQL_ENDPOINT:-}
       - GRAPHQL_AUTH_TOKEN=${HUGINN_AUTH_TOKEN:-}
       - SSL_VERIFY=${HUGINN_SSL_VERIFY:-false}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.graphql-huginn.rule=Host(`huginn.${DOMAIN}`)"
