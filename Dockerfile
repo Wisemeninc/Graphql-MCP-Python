@@ -25,6 +25,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server.py .
 COPY server_http.py .
 COPY server_mcp_http.py .
+COPY server_mcp_http_stateful.py .
+COPY event_store.py .
+COPY version.py .
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser && \
@@ -38,5 +41,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Default command runs MCP HTTP server (VS Code compatible)
-CMD ["python", "server_mcp_http.py"]
+# Default command runs stateful MCP HTTP server
+CMD ["python", "server_mcp_http_stateful.py"]
