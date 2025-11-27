@@ -38,6 +38,21 @@ services:
       - MCP_PORT=8001
     restart: unless-stopped
 
+  graphql-huginn:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: huginn-graphql-mcp
+    ports:
+      - "8008:8008"
+    environment:
+      - GRAPHQL_ENDPOINT=https://app.local.huginn.energinet.local/graphql
+      - GRAPHQL_AUTH_TOKEN=${HUGINNSW_TOKEN}
+      - SSL_VERIFY=${SSL_VERIFY:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8008
+    restart: unless-stopped
 
 
   # Optional: Multiple GraphQL endpoints example
