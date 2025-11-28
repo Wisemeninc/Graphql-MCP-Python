@@ -12,7 +12,7 @@ services:
     command:
       # API and Dashboard
       - "--api.dashboard=true"
-      - "--api.insecure=true"
+      - "--api.insecure=false"
       # Entrypoints
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
@@ -57,6 +57,8 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - commonnet
 
   # ============================================================================
   # Redis for Event Store
@@ -74,6 +76,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+    networks:
+      - commonnet
 
   # ============================================================================
   # GraphQL MCP Services
@@ -109,6 +113,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    networks:
+      - commonnet
 
   graphql-starwars-mcp-test:
     build:
@@ -141,6 +147,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    networks:
+      - commonnet
 
   graphql-huginn-mcp-test:
     build:
@@ -174,6 +182,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    networks:
+      - commonnet
 
 
   # Optional: Multiple GraphQL endpoints example
@@ -200,6 +210,10 @@ services:
   #     - "traefik.http.routers.github-graphql.tls.certresolver=letsencrypt"
   #     - "traefik.http.services.github-graphql.loadbalancer.server.port=${GITHUB_MCP_PORT:-8002}"
   #   restart: unless-stopped
+
+networks:
+  commonnet:
+    external: true
 
 volumes:
   letsencrypt:
