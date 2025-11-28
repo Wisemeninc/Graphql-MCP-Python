@@ -296,6 +296,12 @@ async def oauth_metadata(request: Request) -> JSONResponse:
     
     if OAUTH_ENABLED:
         metadata["revocation_endpoint"] = f"{base_url}/auth/revoke"
+        # Provide the public client ID for VS Code and other MCP clients
+        # This is safe to expose as it's a public OAuth client identifier
+        oauth_config = get_oauth_config(OAUTH_PROVIDER)
+        if oauth_config and oauth_config.client_id:
+            metadata["client_id"] = oauth_config.client_id
+            metadata["client_id_hint"] = f"Use this Client ID when connecting: {oauth_config.client_id}"
     
     return JSONResponse(metadata)
 
@@ -686,12 +692,18 @@ async def auth_status(request: Request) -> JSONResponse:
             "scope": token_set.scope
         })
     
+    # Include client_id in unauthenticated response for VS Code users
+    oauth_config = get_oauth_config(OAUTH_PROVIDER)
+    client_id = oauth_config.client_id if oauth_config else None
+    
     return JSONResponse({
         "auth_enabled": True,
         "oauth_version": "2.1",
         "authenticated": False,
         "login_url": "/auth/login",
-        "providers": [OAUTH_PROVIDER]
+        "providers": [OAUTH_PROVIDER],
+        "client_id": client_id,
+        "client_id_hint": f"Use this Client ID when connecting from VS Code: {client_id}" if client_id else None
     })
 
 
