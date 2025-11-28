@@ -1,31 +1,35 @@
 services:
   # ============================================================================
-  # Traefik Reverse Proxy with Let's Encrypt TLS (Optional)
+  # Traefik Reverse Proxy with Let's Encrypt TLS
   # ============================================================================
-  # Enable by setting TLS_ENABLED=true in .env
   traefik:
-    image: traefik:v3.2
+    image: traefik:v3.6
     container_name: traefik
-    profiles:
-      - tls
+      #    profiles:
+      #      - tls
+    env_file:
+      - .env
     command:
       # API and Dashboard
       - "--api.dashboard=true"
-      - "--api.insecure=false"
+      - "--api.insecure=true"
       # Entrypoints
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
+      # Set default TLS options to use letsencrypt resolver
+      - "--entrypoints.websecure.http.tls=true"
+      - "--entrypoints.websecure.http.tls.certresolver=letsencrypt"
       # Redirect HTTP to HTTPS
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
       # Let's Encrypt with Cloudflare DNS challenge
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
       - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare"
-      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.delaybeforecheck=10"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.propagation.delaybeforechecks=10s"
       - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
       # Use staging server for testing (uncomment for production)
-      # - "--certificatesresolvers.letsencrypt.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+      #    - "--certificatesresolvers.letsencrypt.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
       # Docker provider
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
@@ -33,12 +37,13 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "8080:8080"
     environment:
       - CF_API_EMAIL=${CF_API_EMAIL}
       - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
-      - "letsencrypt:/letsencrypt"
+      - "./letsencrypt:/letsencrypt"
     labels:
       # Dashboard
       - "traefik.enable=true"
@@ -48,6 +53,9 @@ services:
       - "traefik.http.routers.dashboard.tls.certresolver=letsencrypt"
       - "traefik.http.routers.dashboard.middlewares=dashboard-auth"
       - "traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   # ============================================================================
@@ -70,18 +78,18 @@ services:
   # ============================================================================
   # GraphQL MCP Services
   # ============================================================================
-  graphql-rick-mcp:
+  graphql-rick-mcp-test:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: graphql-rick-mcp
+    container_name: graphql-rick-mcp-test
     ports:
-      - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"
+      - "${DEFAULT_MCP_PORT:-8010}:${DEFAULT_MCP_PORT:-8010}"
     env_file:
       - .env
     environment:
       - MCP_HOST=0.0.0.0
-      - MCP_PORT=${DEFAULT_MCP_PORT:-}
+      - MCP_PORT=${DEFAULT_MCP_PORT:-8010}
       - GRAPHQL_ENDPOINT=${DEFAULT_GRAPHQL_ENDPOINT:-}
       - GRAPHQL_AUTH_TOKEN=${DEFAULT_AUTH_TOKEN:-}
       - REDIS_URL=redis://redis:6379/0
@@ -93,20 +101,20 @@ services:
       - "traefik.http.routers.graphql-rick.rule=Host(`rick.${DOMAIN}`)"
       - "traefik.http.routers.graphql-rick.entrypoints=websecure"
       - "traefik.http.routers.graphql-rick.tls.certresolver=letsencrypt"
-      - "traefik.http.services.graphql-rick.loadbalancer.server.port=${MCP_PORT:-8000}"
+      - "traefik.http.services.graphql-rick.loadbalancer.server.port=${DEFAULT_MCP_PORT:-8010}"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${MCP_PORT:-8000}/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:${DEFAULT_MCP_PORT:-8010}/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
-  graphql-starwars-mcp:
+  graphql-starwars-mcp-test:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: graphql-starwars-mcp
+    container_name: graphql-starwars-mcp-test
     ports:
       - "${STARWARS_MCP_PORT:-8001}:${STARWARS_MCP_PORT:-8001}"
     env_file:
@@ -127,12 +135,18 @@ services:
       - "traefik.http.routers.graphql-starwars.tls.certresolver=letsencrypt"
       - "traefik.http.services.graphql-starwars.loadbalancer.server.port=${STARWARS_MCP_PORT:-8001}"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${STARWARS_MCP_PORT:-8001}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
-  graphql-huginn-mcp:
+  graphql-huginn-mcp-test:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: huginn-graphql-mcp
+    container_name: huginn-graphql-mcp-test
     ports:
       - "${HUGINN_MCP_PORT:-8008}:${HUGINN_MCP_PORT:-8008}"
     env_file:
@@ -154,6 +168,12 @@ services:
       - "traefik.http.routers.graphql-huginn.tls.certresolver=letsencrypt"
       - "traefik.http.services.graphql-huginn.loadbalancer.server.port=${HUGINN_MCP_PORT:-8008}"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${HUGINN_MCP_PORT:-8008}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
 
   # Optional: Multiple GraphQL endpoints example

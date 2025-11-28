@@ -5,6 +5,61 @@ All notable changes to the GraphQL MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2025-11-28
+
+### Added
+
+#### OAuth 2.1 Authorization Server (RFC 8414, RFC 9728)
+- Full OAuth 2.1 Authorization Server implementation for MCP client authentication
+- `/.well-known/oauth-authorization-server` - RFC 8414 metadata discovery endpoint
+- `/.well-known/oauth-protected-resource` - RFC 9728 protected resource metadata
+- `/authorize` - OAuth authorization endpoint (proxies to GitHub/Google/Azure)
+- `/token` - Token exchange endpoint with PKCE verification
+- Support for MCP clients (VS Code) to authenticate via standard OAuth flow
+- Authorization code generation and one-time-use validation
+- Proper HTTPS URL generation via X-Forwarded-Proto/Host headers (Traefik support)
+
+#### SSL/TLS Configuration
+- `SSL_VERIFY` environment variable to control certificate verification
+- Configurable SSL for GraphQL client connections
+- Support for self-signed certificates in development environments
+
+### Changed
+- OAuth metadata endpoints now respect reverse proxy headers for correct URL generation
+- Improved auth_callback to handle both legacy and OAuth AS flows
+
+### Fixed
+- Fixed HTTP URLs in OAuth metadata when behind TLS-terminating reverse proxy
+
+---
+
+## [1.3.0] - 2025-11-27
+
+### Added
+
+#### OAuth 2.1 Authentication with PKCE
+- Full OAuth 2.1 implementation with PKCE (Proof Key for Code Exchange)
+- Support for multiple providers: GitHub, Google, Azure AD
+- `oauth21.py` - Complete OAuth 2.1 client implementation
+- Token store with automatic cleanup and refresh token rotation
+- User/group-based authorization controls
+- `OAUTH_ENABLED`, `OAUTH_PROVIDER` environment variables
+- `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET` for provider credentials
+- `OAUTH_ALLOWED_USERS`, `OAUTH_ALLOWED_GROUPS` for access control
+
+#### TLS/HTTPS Support
+- Traefik reverse proxy with automatic Let's Encrypt certificates
+- Cloudflare DNS validation for wildcard certificates
+- Docker Compose configuration for full TLS setup
+- Support for multiple domains/subdomains
+
+### Security
+- PKCE S256 challenge verification (OAuth 2.1 requirement)
+- Refresh token rotation for enhanced security
+- Bearer token validation on MCP endpoints
+
+---
+
 ## [1.2.0] - 2025-11-25
 
 ### Added

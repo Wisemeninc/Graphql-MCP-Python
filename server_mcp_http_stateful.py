@@ -257,6 +257,206 @@ async def handle_epoch_to_readable(
 
 
 # ============================================================================
+# OAuth 2.1 Authorization Server Endpoints (RFC 8414)
+# ============================================================================
+
+def get_external_base_url(request: Request) -> str:
+    """
+    Get the external base URL, respecting X-Forwarded-* headers from reverse proxies.
+    """
+    # Check for X-Forwarded-Proto header (set by Traefik/nginx)
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    
+    # Check for X-Forwarded-Host header
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    
+    # Build the base URL
+    return f"{proto}://{host}"
+
+
+async def oauth_metadata(request: Request) -> JSONResponse:
+    """
+    OAuth 2.0 Authorization Server Metadata (RFC 8414)
+    Returns server metadata for MCP client discovery.
+    """
+    # Get the base URL respecting proxy headers
+    base_url = get_external_base_url(request)
+    
+    metadata = {
+        "issuer": base_url,
+        "authorization_endpoint": f"{base_url}/authorize",
+        "token_endpoint": f"{base_url}/token",
+        "token_endpoint_auth_methods_supported": ["none"],  # Public client
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "response_types_supported": ["code"],
+        "code_challenge_methods_supported": ["S256"],
+        "scopes_supported": ["openid", "profile", "email"],
+        "service_documentation": f"{base_url}/docs"
+    }
+    
+    if OAUTH_ENABLED:
+        metadata["revocation_endpoint"] = f"{base_url}/auth/revoke"
+    
+    return JSONResponse(metadata)
+
+
+async def oauth_protected_resource(request: Request) -> JSONResponse:
+    """
+    OAuth 2.0 Protected Resource Metadata (RFC 9728)
+    Tells MCP clients how to authenticate with this server.
+    """
+    base_url = get_external_base_url(request)
+    
+    metadata = {
+        "resource": base_url,
+        "authorization_servers": [base_url],
+        "scopes_supported": ["openid", "profile", "email"],
+        "bearer_methods_supported": ["header"],
+        "resource_documentation": f"{base_url}/docs"
+    }
+    
+    return JSONResponse(metadata)
+
+
+async def oauth_authorize(request: Request) -> Response:
+    """
+    OAuth 2.1 Authorization endpoint.
+    Proxies to the configured OAuth provider (e.g., GitHub).
+    """
+    if not OAUTH_ENABLED:
+        return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
+    
+    # Extract OAuth parameters from the request
+    client_id = request.query_params.get("client_id")
+    redirect_uri = request.query_params.get("redirect_uri")
+    response_type = request.query_params.get("response_type")
+    state = request.query_params.get("state")
+    code_challenge = request.query_params.get("code_challenge")
+    code_challenge_method = request.query_params.get("code_challenge_method")
+    scope = request.query_params.get("scope", "")
+    
+    if response_type != "code":
+        return JSONResponse({"error": "unsupported_response_type"}, status_code=400)
+    
+    # Get OAuth client for provider
+    client = get_oauth_client(OAUTH_PROVIDER)
+    if not client:
+        return JSONResponse({"error": f"OAuth provider '{OAUTH_PROVIDER}' not configured"}, status_code=500)
+    
+    # Create authorization URL with PKCE to the upstream provider
+    # We'll store the client's PKCE challenge and state so we can relay them back
+    callback_url = client.config.redirect_uri or str(request.url_for("auth_callback"))
+    
+    # Create our own auth request to the upstream provider
+    auth_url, auth_request = client.create_authorization_url(
+        redirect_uri=callback_url,
+        client_redirect_uri=redirect_uri  # Store original redirect_uri
+    )
+    
+    # Store mapping: our state -> client's state and code_challenge
+    auth_request.metadata = {
+        "client_state": state,
+        "client_redirect_uri": redirect_uri,
+        "client_code_challenge": code_challenge,
+        "client_code_challenge_method": code_challenge_method,
+        "client_id": client_id
+    }
+    token_store.store_auth_request(auth_request)
+    
+    logger.debug(f"Proxying authorization to {OAUTH_PROVIDER}, state={auth_request.state}")
+    return RedirectResponse(url=auth_url)
+
+
+async def oauth_token(request: Request) -> JSONResponse:
+    """
+    OAuth 2.1 Token endpoint.
+    Exchanges authorization code for tokens.
+    """
+    if not OAUTH_ENABLED:
+        return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
+    
+    try:
+        # Accept both form-encoded and JSON
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            body = await request.json()
+        else:
+            form = await request.form()
+            body = dict(form)
+    except Exception:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    
+    grant_type = body.get("grant_type")
+    
+    if grant_type == "authorization_code":
+        code = body.get("code")
+        redirect_uri = body.get("redirect_uri")
+        code_verifier = body.get("code_verifier")
+        
+        if not code:
+            return JSONResponse({"error": "invalid_request", "error_description": "code is required"}, status_code=400)
+        
+        # Look up the stored token by code
+        token_set = token_store.get_token_by_code(code)
+        if not token_set:
+            return JSONResponse({"error": "invalid_grant", "error_description": "Invalid or expired code"}, status_code=400)
+        
+        # Verify PKCE if provided
+        if token_set.metadata and token_set.metadata.get("client_code_challenge"):
+            if not code_verifier:
+                return JSONResponse({"error": "invalid_request", "error_description": "code_verifier required"}, status_code=400)
+            
+            # Verify S256 challenge
+            import hashlib
+            import base64
+            computed = base64.urlsafe_b64encode(
+                hashlib.sha256(code_verifier.encode()).digest()
+            ).rstrip(b"=").decode()
+            
+            if computed != token_set.metadata["client_code_challenge"]:
+                return JSONResponse({"error": "invalid_grant", "error_description": "code_verifier mismatch"}, status_code=400)
+        
+        # Mark code as used (one-time use)
+        token_store.consume_code(code)
+        
+        return JSONResponse({
+            "access_token": token_set.access_token,
+            "token_type": "Bearer",
+            "expires_in": int(token_set.expires_at - time.time()),
+            "refresh_token": token_set.refresh_token,
+            "scope": token_set.scope
+        })
+    
+    elif grant_type == "refresh_token":
+        refresh_token = body.get("refresh_token")
+        if not refresh_token:
+            return JSONResponse({"error": "invalid_request", "error_description": "refresh_token required"}, status_code=400)
+        
+        # Get existing token
+        old_token_set = token_store.get_token_by_refresh(refresh_token)
+        if not old_token_set:
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        
+        # Refresh with upstream provider
+        client = get_oauth_client(old_token_set.provider)
+        if client:
+            new_token_set = await client.refresh_tokens(refresh_token)
+            if new_token_set:
+                token_store.rotate_refresh_token(refresh_token, new_token_set)
+                return JSONResponse({
+                    "access_token": new_token_set.access_token,
+                    "token_type": "Bearer",
+                    "expires_in": int(new_token_set.expires_at - time.time()),
+                    "refresh_token": new_token_set.refresh_token,
+                    "scope": new_token_set.scope
+                })
+        
+        return JSONResponse({"error": "invalid_grant"}, status_code=400)
+    
+    return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+
+
+# ============================================================================
 # OAuth 2.1 HTTP Endpoints
 # ============================================================================
 
@@ -341,7 +541,28 @@ async def auth_callback(request: Request) -> Response:
     
     logger.info(f"User {token_set.username} authenticated successfully via {auth_request.provider}")
     
-    # Redirect with token or return JSON
+    # Check if this came from /authorize flow (has client metadata)
+    if hasattr(auth_request, 'metadata') and auth_request.metadata:
+        client_redirect_uri = auth_request.metadata.get("client_redirect_uri")
+        client_state = auth_request.metadata.get("client_state")
+        
+        if client_redirect_uri:
+            # Generate an authorization code for the client
+            auth_code = secrets.token_urlsafe(32)
+            
+            # Store token with the code for later exchange
+            token_set.metadata = auth_request.metadata
+            token_store.store_token_with_code(auth_code, token_set)
+            
+            # Build redirect URL with code and state (OAuth 2.1 standard flow)
+            redirect_url = f"{client_redirect_uri}?code={auth_code}"
+            if client_state:
+                redirect_url += f"&state={client_state}"
+            
+            logger.debug(f"Redirecting to client with auth code: {client_redirect_uri}")
+            return RedirectResponse(url=redirect_url)
+    
+    # Legacy flow: Redirect with token or return JSON
     if auth_request.client_redirect_uri:
         # Fragment-based redirect (more secure than query param)
         return RedirectResponse(
@@ -807,7 +1028,14 @@ def create_app() -> Starlette:
         Route("/tools", list_tools_endpoint, methods=["GET"]),
         Route("/execute", execute_tool_endpoint, methods=["POST"]),
         
-        # OAuth endpoints
+        # OAuth 2.1 Authorization Server endpoints (RFC 8414)
+        Route("/.well-known/oauth-authorization-server", oauth_metadata, methods=["GET"]),
+        Route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"]),
+        Route("/.well-known/oauth-protected-resource/{path:path}", oauth_protected_resource, methods=["GET"]),
+        Route("/authorize", oauth_authorize, methods=["GET"]),
+        Route("/token", oauth_token, methods=["POST"]),
+        
+        # OAuth client endpoints (legacy)
         Route("/auth/login", auth_login, methods=["GET"], name="auth_login"),
         Route("/auth/callback", auth_callback, methods=["GET"], name="auth_callback"),
         Route("/auth/status", auth_status, methods=["GET"]),
@@ -865,7 +1093,10 @@ def run_server():
     logger.info("  /tools  - List available tools")
     logger.info("  /execute - Direct tool execution")
     if OAUTH_ENABLED:
-        logger.info("  /auth/* - OAuth endpoints")
+        logger.info("  /.well-known/oauth-authorization-server - OAuth metadata")
+        logger.info("  /authorize - OAuth authorization endpoint")
+        logger.info("  /token     - OAuth token endpoint")
+        logger.info("  /auth/*    - OAuth client endpoints")
     logger.info("=" * 60)
     
     app = create_app()

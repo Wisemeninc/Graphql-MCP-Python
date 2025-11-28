@@ -26,6 +26,7 @@ COPY server.py .
 COPY server_mcp_http_stateful.py .
 COPY event_store.py .
 COPY version.py .
+COPY oauth21.py .
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser && \

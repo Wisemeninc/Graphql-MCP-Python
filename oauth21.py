@@ -155,6 +155,8 @@ class AuthorizationRequest:
     created_at: float = field(default_factory=time.time)
     # Optional: client-provided redirect after auth
     client_redirect_uri: Optional[str] = None
+    # Metadata for OAuth AS flow (stores client's PKCE, state, etc.)
+    metadata: Optional[dict] = None
 
 
 @dataclass  
@@ -173,6 +175,8 @@ class TokenSet:
     groups: list[str] = field(default_factory=list)
     provider: str = ""
     created_at: float = field(default_factory=time.time)
+    # Metadata for OAuth AS flow
+    metadata: Optional[dict] = None
 
 
 class OAuth21TokenStore:
@@ -185,6 +189,7 @@ class OAuth21TokenStore:
         self._auth_requests: dict[str, AuthorizationRequest] = {}
         self._tokens: dict[str, TokenSet] = {}  # access_token -> TokenSet
         self._refresh_tokens: dict[str, str] = {}  # refresh_token -> access_token
+        self._auth_codes: dict[str, TokenSet] = {}  # auth_code -> TokenSet (for OAuth AS)
         self._last_cleanup = time.time()
         self._cleanup_interval = 300  # 5 minutes
     
@@ -288,6 +293,22 @@ class OAuth21TokenStore:
         
         self.store_token(new_token_set)
         return True
+    
+    # Authorization Code methods (for OAuth Authorization Server role)
+    def store_token_with_code(self, code: str, token_set: TokenSet) -> None:
+        """Store a token set with an authorization code for later exchange"""
+        self._cleanup_if_needed()
+        self._auth_codes[code] = token_set
+    
+    def get_token_by_code(self, code: str) -> Optional[TokenSet]:
+        """Get token set by authorization code (does not consume it)"""
+        self._cleanup_if_needed()
+        return self._auth_codes.get(code)
+    
+    def consume_code(self, code: str) -> Optional[TokenSet]:
+        """Consume an authorization code (one-time use)"""
+        self._cleanup_if_needed()
+        return self._auth_codes.pop(code, None)
 
 
 # Global token store
