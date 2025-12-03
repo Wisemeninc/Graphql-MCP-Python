@@ -28,8 +28,9 @@ COPY event_store.py .
 COPY version.py .
 COPY oauth21.py .
 
-# Create non-root user for security
-RUN useradd --create-home --shell /bin/bash appuser && \
+# Create logs directory and non-root user for security
+RUN mkdir -p /app/logs && \
+    useradd --create-home --shell /bin/bash appuser && \
     chown -R appuser:appuser /app
 USER appuser
 

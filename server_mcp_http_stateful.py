@@ -66,6 +66,87 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
+# ============================================================================
+# Query and Logon File Logging
+# ============================================================================
+
+# Log directory configuration
+LOG_DIR = os.getenv("LOG_DIR", "/app/logs")
+QUERY_LOG_FILE = os.path.join(LOG_DIR, "queries.log")
+LOGON_LOG_FILE = os.path.join(LOG_DIR, "logons.log")
+QUERY_LOG_ENABLED = os.getenv("QUERY_LOG_ENABLED", "true").lower() == "true"
+LOGON_LOG_ENABLED = os.getenv("LOGON_LOG_ENABLED", "true").lower() == "true"
+
+# Create log directory if it doesn't exist
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except Exception as e:
+    logger.warning(f"Could not create log directory {LOG_DIR}: {e}")
+
+# Setup query logger
+query_logger = logging.getLogger("query_log")
+query_logger.setLevel(logging.INFO)
+query_logger.propagate = False  # Don't propagate to root logger
+
+# Setup logon logger
+logon_logger = logging.getLogger("logon_log")
+logon_logger.setLevel(logging.INFO)
+logon_logger.propagate = False
+
+# Add file handlers if logging is enabled
+if QUERY_LOG_ENABLED:
+    try:
+        query_handler = logging.FileHandler(QUERY_LOG_FILE)
+        query_handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        ))
+        query_logger.addHandler(query_handler)
+        logger.info(f"Query logging enabled: {QUERY_LOG_FILE}")
+    except Exception as e:
+        logger.warning(f"Could not setup query log file: {e}")
+        QUERY_LOG_ENABLED = False
+
+if LOGON_LOG_ENABLED:
+    try:
+        logon_handler = logging.FileHandler(LOGON_LOG_FILE)
+        logon_handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        ))
+        logon_logger.addHandler(logon_handler)
+        logger.info(f"Logon logging enabled: {LOGON_LOG_FILE}")
+    except Exception as e:
+        logger.warning(f"Could not setup logon log file: {e}")
+        LOGON_LOG_ENABLED = False
+
+
+def log_query(tool_name: str, arguments: dict, client_ip: str = None, user: str = None):
+    """Log a query/tool call to the query log file."""
+    if not QUERY_LOG_ENABLED:
+        return
+    try:
+        # Truncate large arguments for logging
+        args_str = json.dumps(arguments)[:500] if arguments else "{}"
+        log_entry = f"TOOL={tool_name} | IP={client_ip or 'unknown'} | USER={user or 'anonymous'} | ARGS={args_str}"
+        query_logger.info(log_entry)
+    except Exception as e:
+        logger.debug(f"Failed to log query: {e}")
+
+
+def log_logon(event: str, user: str = None, provider: str = None, client_ip: str = None, success: bool = True, details: str = None):
+    """Log a logon event to the logon log file."""
+    if not LOGON_LOG_ENABLED:
+        return
+    try:
+        status = "SUCCESS" if success else "FAILED"
+        log_entry = f"EVENT={event} | STATUS={status} | USER={user or 'unknown'} | PROVIDER={provider or 'N/A'} | IP={client_ip or 'unknown'}"
+        if details:
+            log_entry += f" | DETAILS={details}"
+        logon_logger.info(log_entry)
+    except Exception as e:
+        logger.debug(f"Failed to log logon: {e}")
+
 # Server info
 SERVER_VERSION = __version__
 PROTOCOL_VERSION = MCP_PROTOCOL_VERSION
@@ -109,8 +190,9 @@ _cimd_cache: dict[str, tuple[dict, float]] = {}
 # Global GraphQL client
 graphql_client: Optional[Client] = None
 
-# Context variable to store client IP for MCP tool calls
+# Context variables to store client info for MCP tool calls
 _client_ip_context: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('client_ip', default=None)
+_client_user_context: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('client_user', default=None)
 
 
 def get_client_ip_from_scope(scope: dict) -> Optional[str]:
@@ -542,6 +624,90 @@ async def handle_ip_info(ip_address: str = None) -> dict:
             "status": "error",
             "error": str(e),
             "ip": ip_address
+        }
+
+
+# Web Search Configuration
+WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "10"))
+WEB_SEARCH_REGION = os.getenv("WEB_SEARCH_REGION", "wt-wt")  # wt-wt = worldwide
+WEB_SEARCH_SAFESEARCH = os.getenv("WEB_SEARCH_SAFESEARCH", "moderate")
+
+
+async def handle_web_search(query: str, max_results: int = None) -> dict:
+    """
+    Search the web using DuckDuckGo.
+    
+    Returns search results with titles, URLs, and snippets.
+    No API key required.
+    """
+    if not query or not query.strip():
+        return {
+            "status": "error",
+            "error": "Search query cannot be empty"
+        }
+    
+    max_results = max_results or WEB_SEARCH_MAX_RESULTS
+    # Cap at 25 results
+    max_results = min(max_results, 25)
+    
+    try:
+        # Use new ddgs package (duckduckgo_search was renamed)
+        from ddgs import DDGS
+        
+        loop = asyncio.get_event_loop()
+        
+        def sync_search():
+            with DDGS() as ddgs:
+                return list(ddgs.text(
+                    query=query.strip(),
+                    region=WEB_SEARCH_REGION,
+                    safesearch=WEB_SEARCH_SAFESEARCH,
+                    max_results=max_results
+                ))
+        
+        # Run blocking search in executor
+        results = await loop.run_in_executor(None, sync_search)
+        
+        if not results:
+            return {
+                "status": "success",
+                "query": query,
+                "results_count": 0,
+                "results": [],
+                "message": "No results found"
+            }
+        
+        # Format results
+        formatted_results = []
+        for idx, result in enumerate(results, 1):
+            formatted_results.append({
+                "position": idx,
+                "title": result.get("title", "No title"),
+                "url": result.get("href", ""),
+                "snippet": result.get("body", "No description available")
+            })
+        
+        logger.info(f"Web search completed: '{query}' -> {len(formatted_results)} results")
+        
+        return {
+            "status": "success",
+            "query": query,
+            "results_count": len(formatted_results),
+            "results": formatted_results
+        }
+        
+    except ImportError:
+        logger.error("duckduckgo-search package not installed")
+        return {
+            "status": "error",
+            "error": "Web search not available: duckduckgo-search package not installed"
+        }
+    except Exception as e:
+        logger.error(f"Web search error: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+            "query": query
         }
 
 
@@ -1088,6 +1254,16 @@ async def auth_callback(request: Request) -> Response:
     # Check authorization
     if not client.is_user_authorized(token_set):
         logger.warning(f"Unauthorized user attempted login: {token_set.username}")
+        # Log failed authorization
+        client_ip = get_client_ip(request)
+        log_logon(
+            event="AUTH_DENIED",
+            user=token_set.username,
+            provider=auth_request.provider,
+            client_ip=client_ip,
+            success=False,
+            details="User not authorized"
+        )
         return JSONResponse({
             "error": "Forbidden",
             "message": f"User {token_set.username} is not authorized to access this server"
@@ -1095,6 +1271,16 @@ async def auth_callback(request: Request) -> Response:
     
     # Store the token
     token_store.store_token(token_set)
+    
+    # Log successful authentication
+    client_ip = get_client_ip(request)
+    log_logon(
+        event="LOGIN",
+        user=token_set.username,
+        provider=auth_request.provider,
+        client_ip=client_ip,
+        success=True
+    )
     
     logger.info(f"User {token_set.username} authenticated successfully via {auth_request.provider}")
     
@@ -1284,9 +1470,27 @@ async def auth_logout(request: Request) -> JSONResponse:
     Logout - revoke current token.
     """
     auth_header = request.headers.get("Authorization", "")
+    client_ip = get_client_ip(request)
+    
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
+        # Try to get user info before revoking
+        if OAUTH_ENABLED:
+            token_set = validate_bearer_token(auth_header)
+            user = token_set.username if token_set else "unknown"
+        else:
+            user = "unknown"
+        
         token_store.revoke_token(token)
+        
+        # Log the logout
+        log_logon(
+            event="LOGOUT",
+            user=user,
+            client_ip=client_ip,
+            success=True
+        )
+        
         return JSONResponse({"success": True, "message": "Logged out successfully"})
     
     return JSONResponse({"success": True, "message": "No active session"})
@@ -1315,7 +1519,8 @@ async def list_tools_endpoint(request: Request) -> JSONResponse:
         {"name": "graphql_get_schema", "description": "Get GraphQL schema in SDL format"},
         {"name": "epoch_to_readable", "description": "Convert epoch timestamp to readable format"},
         {"name": "ntp_time", "description": "Get accurate time from NTP server (dk.pool.ntp.org)"},
-        {"name": "ip_info", "description": "Get timezone and location from IP address (no API key required)"}
+        {"name": "ip_info", "description": "Get timezone and location from IP address (no API key required)"},
+        {"name": "web_search", "description": "Search the web using DuckDuckGo (no API key required)"}
     ]
     return JSONResponse({"tools": tools})
 
@@ -1329,6 +1534,9 @@ async def execute_tool_endpoint(request: Request) -> JSONResponse:
         
         # Get client IP for geo/timezone lookups
         client_ip = get_client_ip(request)
+        
+        # Log the query
+        log_query(tool_name, arguments, client_ip=client_ip)
         
         if tool_name == "graphql_introspection":
             result = await handle_introspection()
@@ -1353,6 +1561,11 @@ async def execute_tool_endpoint(request: Request) -> JSONResponse:
             # Use client IP if no IP specified
             ip_to_lookup = arguments.get("ip") or client_ip
             result = await handle_ip_info(ip_to_lookup)
+        elif tool_name == "web_search":
+            result = await handle_web_search(
+                arguments.get("query", ""),
+                arguments.get("max_results")
+            )
         else:
             return JSONResponse({"error": f"Unknown tool: {tool_name}"}, status_code=400)
         
@@ -1488,6 +1701,25 @@ def create_mcp_server() -> Server:
                     },
                     "required": []
                 }
+            ),
+            types.Tool(
+                name="web_search",
+                description="Search the web using DuckDuckGo (free, no API key required). Returns search results with titles, URLs, and snippets. Useful for finding current information, documentation, news, and general web content.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query string"
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of results to return (default: 10, max: 25)",
+                            "default": 10
+                        }
+                    },
+                    "required": ["query"]
+                }
             )
         ]
     
@@ -1496,6 +1728,11 @@ def create_mcp_server() -> Server:
         """Handle tool calls"""
         logger.info(f"Tool call: {name}")
         logger.debug(f"Arguments: {json.dumps(arguments)[:500] if arguments else 'None'}")
+        
+        # Log query to file with user context
+        client_ip = _client_ip_context.get()
+        client_user = _client_user_context.get()
+        log_query(name, arguments, client_ip=client_ip, user=client_user)
         
         try:
             if name == "graphql_introspection":
@@ -1530,6 +1767,14 @@ def create_mcp_server() -> Server:
                 # Use client IP from context if no IP specified
                 ip_to_lookup = arguments.get("ip") or _client_ip_context.get()
                 result = await handle_ip_info(ip_to_lookup)
+            elif name == "web_search":
+                query = arguments.get("query", "")
+                if not query:
+                    raise ValueError("query parameter is required")
+                result = await handle_web_search(
+                    query,
+                    arguments.get("max_results")
+                )
             else:
                 return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
             
@@ -1556,6 +1801,7 @@ class AuthenticatedMCPHandler:
         # Extract and store client IP in context for tool handlers
         client_ip = get_client_ip_from_scope(scope)
         _client_ip_context.set(client_ip)
+        _client_user_context.set(None)  # Default to None
         
         if OAUTH_ENABLED:
             # Extract Authorization header
@@ -1572,6 +1818,9 @@ class AuthenticatedMCPHandler:
                 )
                 await response(scope, receive, send)
                 return
+            
+            # Store authenticated user in context
+            _client_user_context.set(token_set.username)
             
             # Check authorization using OAuth 2.1 client
             if oauth_client and not oauth_client.is_user_authorized(token_set):

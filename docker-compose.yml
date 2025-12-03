@@ -166,6 +166,9 @@ services:
       - GRAPHQL_AUTH_TOKEN=${HUGINN_AUTH_TOKEN:-}
       - SSL_VERIFY=${HUGINN_SSL_VERIFY:-false}
       - REDIS_URL=redis://redis:6379/0
+      - LOG_DIR=/app/logs
+    volumes:
+      - ./logs:/app/logs
     depends_on:
       redis:
         condition: service_healthy
