@@ -19,6 +19,7 @@ import logging
 import contextlib
 import time
 import secrets
+import asyncio
 from typing import Any, Optional
 from collections.abc import AsyncIterator
 
@@ -94,6 +95,15 @@ if OAUTH_ENABLED:
 SSL_VERIFY = os.getenv("SSL_VERIFY", "true").lower() != "false"
 if not SSL_VERIFY:
     logger.warning("⚠️  SSL certificate verification is DISABLED - use only in development!")
+
+# CIMD (Client ID Metadata Document) Configuration
+CIMD_ENABLED = os.getenv("CIMD_ENABLED", "true").lower() == "true"
+CIMD_CACHE_TTL = int(os.getenv("CIMD_CACHE_TTL", "86400"))  # 24 hours default
+CIMD_MAX_SIZE = int(os.getenv("CIMD_MAX_SIZE", "10240"))  # 10KB max
+CIMD_TIMEOUT = int(os.getenv("CIMD_TIMEOUT", "5"))  # 5 seconds timeout
+
+# In-memory cache for CIMD documents
+_cimd_cache: dict[str, tuple[dict, float]] = {}
 
 # Global GraphQL client
 graphql_client: Optional[Client] = None
@@ -274,10 +284,163 @@ def get_external_base_url(request: Request) -> str:
     return f"{proto}://{host}"
 
 
+# ============================================================================
+# Client ID Metadata Document (CIMD) Support
+# Per: https://www.ietf.org/archive/id/draft-parecki-oauth-client-id-metadata-document-03.html
+# ============================================================================
+
+def is_cimd_client_id(client_id: str) -> bool:
+    """
+    Check if client_id is a CIMD URL (starts with https:// and has a path).
+    Per spec: client_id MUST be an HTTPS URL with a path component.
+    """
+    if not client_id:
+        return False
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(client_id)
+        return (
+            parsed.scheme == "https" and 
+            parsed.netloc and 
+            parsed.path and 
+            parsed.path != "/"
+        )
+    except Exception:
+        return False
+
+
+def is_safe_cimd_url(url: str) -> bool:
+    """
+    Validate URL is safe to fetch (prevent SSRF attacks).
+    Block internal/private IP ranges and localhost.
+    """
+    try:
+        from urllib.parse import urlparse
+        import ipaddress
+        import socket
+        
+        parsed = urlparse(url)
+        hostname = parsed.netloc.split(':')[0]
+        
+        # Block localhost variations
+        if hostname.lower() in ('localhost', '127.0.0.1', '::1', '0.0.0.0'):
+            return False
+        
+        # Try to resolve hostname and check if it's a private IP
+        try:
+            ip = socket.gethostbyname(hostname)
+            ip_obj = ipaddress.ip_address(ip)
+            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_reserved:
+                return False
+        except socket.gaierror:
+            # Can't resolve - might be valid, let the fetch fail
+            pass
+        
+        return True
+    except Exception:
+        return False
+
+
+async def fetch_cimd_metadata(client_id_url: str) -> Optional[dict]:
+    """
+    Fetch Client ID Metadata Document from the client_id URL.
+    
+    Per the spec:
+    - client_id in the document MUST exactly match the URL
+    - Document must contain redirect_uris
+    - Must be valid JSON with size limits
+    
+    Returns validated metadata dict or None if invalid.
+    """
+    global _cimd_cache
+    
+    # Check cache first
+    if client_id_url in _cimd_cache:
+        cached_data, cached_time = _cimd_cache[client_id_url]
+        if time.time() - cached_time < CIMD_CACHE_TTL:
+            logger.debug(f"CIMD cache hit for: {client_id_url}")
+            return cached_data
+    
+    # Validate URL is safe
+    if not is_safe_cimd_url(client_id_url):
+        logger.warning(f"CIMD URL blocked (SSRF protection): {client_id_url}")
+        return None
+    
+    try:
+        timeout = aiohttp.ClientTimeout(total=CIMD_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                client_id_url,
+                headers={"Accept": "application/json"},
+                ssl=None if SSL_VERIFY else False
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"CIMD fetch failed: {resp.status} for {client_id_url}")
+                    return None
+                
+                # Check content length
+                content_length = resp.headers.get("Content-Length")
+                if content_length and int(content_length) > CIMD_MAX_SIZE:
+                    logger.warning(f"CIMD too large: {content_length} bytes for {client_id_url}")
+                    return None
+                
+                # Read with size limit
+                content = await resp.read()
+                if len(content) > CIMD_MAX_SIZE:
+                    logger.warning(f"CIMD too large: {len(content)} bytes for {client_id_url}")
+                    return None
+                
+                metadata = json.loads(content.decode('utf-8'))
+                
+                # Validate required fields per spec
+                if not isinstance(metadata, dict):
+                    logger.warning(f"CIMD not a JSON object: {client_id_url}")
+                    return None
+                
+                # client_id MUST exactly match the URL
+                if metadata.get("client_id") != client_id_url:
+                    logger.warning(f"CIMD client_id mismatch: expected {client_id_url}, got {metadata.get('client_id')}")
+                    return None
+                
+                # redirect_uris is required
+                if "redirect_uris" not in metadata or not isinstance(metadata["redirect_uris"], list):
+                    logger.warning(f"CIMD missing redirect_uris: {client_id_url}")
+                    return None
+                
+                # Cache the valid metadata
+                _cimd_cache[client_id_url] = (metadata, time.time())
+                logger.info(f"CIMD fetched and cached: {client_id_url} ({metadata.get('client_name', 'Unknown')})")
+                
+                return metadata
+                
+    except asyncio.TimeoutError:
+        logger.warning(f"CIMD fetch timeout: {client_id_url}")
+        return None
+    except json.JSONDecodeError:
+        logger.warning(f"CIMD invalid JSON: {client_id_url}")
+        return None
+    except Exception as e:
+        logger.error(f"CIMD fetch error for {client_id_url}: {e}")
+        return None
+
+
+def validate_cimd_redirect_uri(metadata: dict, redirect_uri: str) -> bool:
+    """
+    Validate that the redirect_uri is in the client's allowed list.
+    Per spec: exact string match required.
+    """
+    allowed_uris = metadata.get("redirect_uris", [])
+    return redirect_uri in allowed_uris
+
+
 async def oauth_metadata(request: Request) -> JSONResponse:
     """
     OAuth 2.0 Authorization Server Metadata (RFC 8414)
     Returns server metadata for MCP client discovery.
+    
+    Supports:
+    - Dynamic Client Registration (RFC 7591)
+    - Client ID Metadata Documents (CIMD) per draft-parecki-oauth-client-id-metadata-document
     """
     # Get the base URL respecting proxy headers
     base_url = get_external_base_url(request)
@@ -296,6 +459,13 @@ async def oauth_metadata(request: Request) -> JSONResponse:
     
     if OAUTH_ENABLED:
         metadata["revocation_endpoint"] = f"{base_url}/auth/revoke"
+        metadata["registration_endpoint"] = f"{base_url}/register"
+        
+        # Advertise CIMD support per draft-parecki-oauth-client-id-metadata-document
+        # This tells MCP clients they can use URL-based client_ids
+        if CIMD_ENABLED:
+            metadata["client_id_metadata_document_supported"] = True
+        
         # Provide the public client ID for VS Code and other MCP clients
         # This is safe to expose as it's a public OAuth client identifier
         oauth_config = get_oauth_config(OAUTH_PROVIDER)
@@ -324,10 +494,66 @@ async def oauth_protected_resource(request: Request) -> JSONResponse:
     return JSONResponse(metadata)
 
 
+async def oauth_register(request: Request) -> JSONResponse:
+    """
+    OAuth 2.0 Dynamic Client Registration (RFC 7591)
+    
+    Allows MCP clients (like VS Code) to automatically obtain a client_id
+    without user interaction. This is the recommended way per MCP spec.
+    
+    Since we're proxying to GitHub OAuth, we return our shared public client_id.
+    """
+    if not OAUTH_ENABLED:
+        return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
+    
+    oauth_config = get_oauth_config(OAUTH_PROVIDER)
+    if not oauth_config or not oauth_config.client_id:
+        return JSONResponse({"error": "server_error", "error_description": "OAuth not configured"}, status_code=500)
+    
+    try:
+        # Parse registration request (may be empty for simple clients)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        
+        # Get requested redirect URIs (VS Code will provide these)
+        redirect_uris = body.get("redirect_uris", [])
+        client_name = body.get("client_name", "MCP Client")
+        
+        # For a proxy setup to GitHub, we return our shared client credentials
+        # In a full implementation, you'd generate unique client_ids per registration
+        base_url = get_external_base_url(request)
+        
+        # Return client registration response per RFC 7591
+        response = {
+            "client_id": oauth_config.client_id,
+            "client_name": client_name,
+            "redirect_uris": redirect_uris if redirect_uris else [f"{base_url}/callback"],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",  # Public client
+            # Additional metadata
+            "client_id_issued_at": int(time.time()),
+            # No expiration - client_id is permanent
+        }
+        
+        logger.info(f"Dynamic client registration: {client_name}")
+        return JSONResponse(response, status_code=201)
+        
+    except Exception as e:
+        logger.error(f"Client registration error: {e}")
+        return JSONResponse({"error": "invalid_client_metadata"}, status_code=400)
+
+
 async def oauth_authorize(request: Request) -> Response:
     """
     OAuth 2.1 Authorization endpoint.
     Proxies to the configured OAuth provider (e.g., GitHub).
+    
+    Supports:
+    - Traditional client_id (string)
+    - CIMD client_id (HTTPS URL) per draft-parecki-oauth-client-id-metadata-document
     """
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
@@ -343,6 +569,27 @@ async def oauth_authorize(request: Request) -> Response:
     
     if response_type != "code":
         return JSONResponse({"error": "unsupported_response_type"}, status_code=400)
+    
+    # Handle CIMD (Client ID Metadata Document) - client_id is an HTTPS URL
+    client_metadata = None
+    if CIMD_ENABLED and client_id and is_cimd_client_id(client_id):
+        logger.info(f"CIMD client_id detected: {client_id}")
+        client_metadata = await fetch_cimd_metadata(client_id)
+        
+        if not client_metadata:
+            return JSONResponse({
+                "error": "invalid_client",
+                "error_description": "Failed to fetch or validate client metadata from URL"
+            }, status_code=400)
+        
+        # Validate redirect_uri against CIMD
+        if redirect_uri and not validate_cimd_redirect_uri(client_metadata, redirect_uri):
+            return JSONResponse({
+                "error": "invalid_request",
+                "error_description": f"redirect_uri not in client's allowed list"
+            }, status_code=400)
+        
+        logger.info(f"CIMD validated for client: {client_metadata.get('client_name', 'Unknown')}")
     
     # Get OAuth client for provider
     client = get_oauth_client(OAUTH_PROVIDER)
@@ -365,7 +612,9 @@ async def oauth_authorize(request: Request) -> Response:
         "client_redirect_uri": redirect_uri,
         "client_code_challenge": code_challenge,
         "client_code_challenge_method": code_challenge_method,
-        "client_id": client_id
+        "client_id": client_id,
+        "cimd_client_name": client_metadata.get("client_name") if client_metadata else None,
+        "cimd_validated": client_metadata is not None
     }
     token_store.store_auth_request(auth_request)
     
@@ -1046,6 +1295,7 @@ def create_app() -> Starlette:
         Route("/.well-known/oauth-protected-resource/{path:path}", oauth_protected_resource, methods=["GET"]),
         Route("/authorize", oauth_authorize, methods=["GET"]),
         Route("/token", oauth_token, methods=["POST"]),
+        Route("/register", oauth_register, methods=["POST"]),
         
         # OAuth client endpoints (legacy)
         Route("/auth/login", auth_login, methods=["GET"], name="auth_login"),
@@ -1095,6 +1345,8 @@ def run_server():
     logger.info(f"Log Level: {LOG_LEVEL}")
     logger.info(f"SSL Verify: {SSL_VERIFY}")
     logger.info(f"OAuth 2.1: {'Enabled (' + OAUTH_PROVIDER + ')' if OAUTH_ENABLED else 'Disabled'}")
+    if OAUTH_ENABLED and CIMD_ENABLED:
+        logger.info(f"CIMD: Enabled (Client ID Metadata Documents)")
     logger.info("=" * 60)
     logger.info("Session Management: StreamableHTTPSessionManager")
     logger.info("Resumability: Enabled (InMemoryEventStore)")
@@ -1106,8 +1358,9 @@ def run_server():
     logger.info("  /execute - Direct tool execution")
     if OAUTH_ENABLED:
         logger.info("  /.well-known/oauth-authorization-server - OAuth metadata")
-        logger.info("  /authorize - OAuth authorization endpoint")
+        logger.info("  /authorize - OAuth authorization endpoint (supports CIMD)")
         logger.info("  /token     - OAuth token endpoint")
+        logger.info("  /register  - Dynamic client registration (RFC 7591)")
         logger.info("  /auth/*    - OAuth client endpoints")
     logger.info("=" * 60)
     
