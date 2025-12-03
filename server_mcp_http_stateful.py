@@ -20,6 +20,7 @@ import contextlib
 import time
 import secrets
 import asyncio
+import contextvars
 from typing import Any, Optional
 from collections.abc import AsyncIterator
 
@@ -107,6 +108,34 @@ _cimd_cache: dict[str, tuple[dict, float]] = {}
 
 # Global GraphQL client
 graphql_client: Optional[Client] = None
+
+# Context variable to store client IP for MCP tool calls
+_client_ip_context: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('client_ip', default=None)
+
+
+def get_client_ip_from_scope(scope: dict) -> Optional[str]:
+    """
+    Extract the client's real IP address from ASGI scope.
+    Respects X-Forwarded-For and X-Real-IP headers from reverse proxies.
+    """
+    headers = dict(scope.get("headers", []))
+    
+    # Check for X-Forwarded-For header (comma-separated list, first is client)
+    forwarded_for = headers.get(b"x-forwarded-for", b"").decode()
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    
+    # Check for X-Real-IP header
+    real_ip = headers.get(b"x-real-ip", b"").decode()
+    if real_ip:
+        return real_ip.strip()
+    
+    # Fall back to direct connection IP from scope
+    client = scope.get("client")
+    if client and len(client) >= 1:
+        return client[0]
+    
+    return None
 
 
 # ============================================================================
@@ -270,9 +299,9 @@ async def handle_epoch_to_readable(
 NTP_SERVER = os.getenv("NTP_SERVER", "dk.pool.ntp.org")
 NTP_TIMEOUT = float(os.getenv("NTP_TIMEOUT", "5.0"))
 
-# Geo-location Configuration
-GEO_API_URL = "https://tools.keycdn.com/geo"
-GEO_TIMEOUT = float(os.getenv("GEO_TIMEOUT", "10.0"))
+# IP Info Configuration (ip-api.com - free, no API key required)
+IP_API_URL = "http://ip-api.com/json"
+IP_API_TIMEOUT = float(os.getenv("IP_API_TIMEOUT", "10.0"))
 
 
 async def handle_ntp_time(
@@ -389,31 +418,47 @@ async def handle_ntp_time(
         }
 
 
-async def handle_geo_location(ip_address: str = None) -> dict:
+async def handle_ip_info(ip_address: str = None) -> dict:
     """
-    Get geographic location from IP address using KeyCDN's geo API.
+    Get IP information including timezone and location using ip-api.com.
     
-    If no IP is provided, uses the server's external IP.
-    Returns location data including country, city, coordinates, ISP, etc.
+    This is a free API that doesn't require an API key.
+    Rate limit: 45 requests per minute from an IP address.
+    
+    Returns:
+    - IP address
+    - Location (country, region, city, coordinates)
+    - Timezone information with current local time
+    - ISP and organization info
     """
     try:
         # Build the API URL
-        url = GEO_API_URL
-        params = {}
-        if ip_address:
-            params["host"] = ip_address
+        # ip-api.com format: http://ip-api.com/json/{ip}?fields=...
+        fields = "status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,offset,isp,org,as,query"
         
-        timeout = aiohttp.ClientTimeout(total=GEO_TIMEOUT)
+        if ip_address:
+            url = f"{IP_API_URL}/{ip_address}"
+        else:
+            url = IP_API_URL
+        
+        timeout = aiohttp.ClientTimeout(total=IP_API_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(
                 url,
-                params=params,
+                params={"fields": fields},
                 headers={
                     "User-Agent": f"{SERVER_NAME}/{SERVER_VERSION}",
                     "Accept": "application/json"
-                },
-                ssl=None if SSL_VERIFY else False
+                }
             ) as resp:
+                
+                if resp.status == 429:
+                    return {
+                        "status": "error",
+                        "error": "Rate limit exceeded (45 req/min). Please wait before retrying.",
+                        "ip": ip_address
+                    }
+                
                 if resp.status != 200:
                     return {
                         "status": "error",
@@ -421,103 +466,78 @@ async def handle_geo_location(ip_address: str = None) -> dict:
                         "ip": ip_address
                     }
                 
-                # Parse HTML response to extract JSON data
-                # KeyCDN returns HTML with embedded JSON in a specific format
-                content = await resp.text()
+                data = await resp.json()
                 
-                # Try to find JSON in the response
-                import re
-                
-                # Look for the geo data in the page
-                # KeyCDN embeds data in a specific format
-                json_match = re.search(r'<code[^>]*id="geoResult"[^>]*>([^<]+)</code>', content)
-                if json_match:
-                    try:
-                        geo_data = json.loads(json_match.group(1))
-                    except json.JSONDecodeError:
-                        geo_data = None
-                else:
-                    # Try parsing as direct JSON
-                    try:
-                        geo_data = json.loads(content)
-                    except json.JSONDecodeError:
-                        geo_data = None
-                
-                if not geo_data:
-                    # Fallback: scrape the visible data from HTML
-                    result = {
-                        "status": "success",
-                        "ip": ip_address,
-                        "source": "keycdn",
-                        "raw_response": "HTML response received - use IP lookup API directly"
+                # Check API-level status
+                if data.get("status") == "fail":
+                    return {
+                        "status": "error",
+                        "error": data.get("message", "Unknown error"),
+                        "ip": ip_address
                     }
-                    
-                    # Try to extract common fields from HTML
-                    patterns = {
-                        "ip": r'IP Address[^<]*<[^>]+>([^<]+)',
-                        "country": r'Country[^<]*<[^>]+>([^<]+)',
-                        "city": r'City[^<]*<[^>]+>([^<]+)',
-                        "region": r'Region[^<]*<[^>]+>([^<]+)',
-                        "latitude": r'Latitude[^<]*<[^>]+>([\d.-]+)',
-                        "longitude": r'Longitude[^<]*<[^>]+>([\d.-]+)',
-                        "timezone": r'Timezone[^<]*<[^>]+>([^<]+)',
-                        "isp": r'ISP[^<]*<[^>]+>([^<]+)',
-                    }
-                    
-                    for field, pattern in patterns.items():
-                        match = re.search(pattern, content, re.IGNORECASE)
-                        if match:
-                            result[field] = match.group(1).strip()
-                    
-                    logger.info(f"Geo location retrieved for IP: {ip_address or 'auto'}")
-                    return result
                 
-                # Process the JSON data
-                if "data" in geo_data and "geo" in geo_data["data"]:
-                    geo = geo_data["data"]["geo"]
-                else:
-                    geo = geo_data
+                # Get current time in the timezone
+                tz_name = data.get("timezone", "UTC")
+                offset_seconds = data.get("offset", 0)
+                
+                # Calculate current time in timezone
+                utc_now = time.time()
+                local_time = utc_now + offset_seconds
+                local_utc = time.gmtime(local_time)
+                
+                # Format offset as ±HH:MM
+                offset_hours = offset_seconds // 3600
+                offset_mins = abs(offset_seconds % 3600) // 60
+                offset_str = f"{'+' if offset_seconds >= 0 else '-'}{abs(offset_hours):02d}:{offset_mins:02d}"
                 
                 result = {
                     "status": "success",
-                    "ip": geo.get("ip", ip_address),
-                    "hostname": geo.get("host") or geo.get("rdns"),
+                    "ip": data.get("query"),
+                    "timezone": {
+                        "name": tz_name,
+                        "offset_seconds": offset_seconds,
+                        "offset": offset_str,
+                        "current_time": {
+                            "iso8601": time.strftime("%Y-%m-%dT%H:%M:%S", local_utc) + offset_str.replace(":", ""),
+                            "readable": time.strftime("%Y-%m-%d %H:%M:%S", local_utc) + f" ({tz_name})",
+                            "date": time.strftime("%Y-%m-%d", local_utc),
+                            "time": time.strftime("%H:%M:%S", local_utc),
+                            "unix_utc": utc_now
+                        }
+                    },
                     "location": {
-                        "country_name": geo.get("country_name"),
-                        "country_code": geo.get("country_code"),
-                        "region_name": geo.get("region_name"),
-                        "region_code": geo.get("region_code"),
-                        "city": geo.get("city"),
-                        "postal_code": geo.get("postal_code"),
-                        "latitude": geo.get("latitude"),
-                        "longitude": geo.get("longitude"),
-                        "timezone": geo.get("timezone"),
+                        "country": data.get("country"),
+                        "country_code": data.get("countryCode"),
+                        "region": data.get("regionName"),
+                        "region_code": data.get("region"),
+                        "city": data.get("city"),
+                        "zip": data.get("zip"),
+                        "latitude": data.get("lat"),
+                        "longitude": data.get("lon")
                     },
                     "network": {
-                        "asn": geo.get("asn"),
-                        "isp": geo.get("isp"),
-                        "organization": geo.get("org") or geo.get("organization"),
-                    },
-                    "source": "keycdn"
+                        "isp": data.get("isp"),
+                        "org": data.get("org"),
+                        "as": data.get("as")
+                    }
                 }
                 
-                # Add coordinates as a convenience field
-                if geo.get("latitude") and geo.get("longitude"):
-                    result["coordinates"] = f"{geo.get('latitude')}, {geo.get('longitude')}"
-                    result["maps_url"] = f"https://www.google.com/maps?q={geo.get('latitude')},{geo.get('longitude')}"
+                # Add maps URL if coordinates available
+                if data.get("lat") and data.get("lon"):
+                    result["location"]["maps_url"] = f"https://www.google.com/maps?q={data.get('lat')},{data.get('lon')}"
                 
-                logger.info(f"Geo location retrieved for IP: {result['ip']} -> {geo.get('city')}, {geo.get('country_name')}")
+                logger.info(f"IP info retrieved: {data.get('query')} -> {tz_name} ({data.get('city')}, {data.get('country')})")
                 return result
                 
     except asyncio.TimeoutError:
-        logger.warning(f"Geo location request timed out for IP: {ip_address}")
+        logger.warning(f"IP API request timed out for IP: {ip_address}")
         return {
             "status": "error",
-            "error": f"Request timed out (>{GEO_TIMEOUT}s)",
+            "error": f"Request timed out (>{IP_API_TIMEOUT}s)",
             "ip": ip_address
         }
     except Exception as e:
-        logger.error(f"Geo location error: {e}", exc_info=True)
+        logger.error(f"IP API error: {e}", exc_info=True)
         return {
             "status": "error",
             "error": str(e),
@@ -528,6 +548,29 @@ async def handle_geo_location(ip_address: str = None) -> dict:
 # ============================================================================
 # OAuth 2.1 Authorization Server Endpoints (RFC 8414)
 # ============================================================================
+
+def get_client_ip(request: Request) -> str:
+    """
+    Extract the client's real IP address from the request.
+    Respects X-Forwarded-For and X-Real-IP headers from reverse proxies.
+    """
+    # Check for X-Forwarded-For header (comma-separated list, first is client)
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        # Take the first IP in the chain (original client)
+        return forwarded_for.split(",")[0].strip()
+    
+    # Check for X-Real-IP header
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    
+    # Fall back to direct connection IP
+    if request.client and request.client.host:
+        return request.client.host
+    
+    return None
+
 
 def get_external_base_url(request: Request) -> str:
     """
@@ -1272,7 +1315,7 @@ async def list_tools_endpoint(request: Request) -> JSONResponse:
         {"name": "graphql_get_schema", "description": "Get GraphQL schema in SDL format"},
         {"name": "epoch_to_readable", "description": "Convert epoch timestamp to readable format"},
         {"name": "ntp_time", "description": "Get accurate time from NTP server (dk.pool.ntp.org)"},
-        {"name": "geo_location", "description": "Get geographic location from IP address"}
+        {"name": "ip_info", "description": "Get timezone and location from IP address (no API key required)"}
     ]
     return JSONResponse({"tools": tools})
 
@@ -1283,6 +1326,9 @@ async def execute_tool_endpoint(request: Request) -> JSONResponse:
         body = await request.json()
         tool_name = body.get("tool")
         arguments = body.get("arguments", {})
+        
+        # Get client IP for geo/timezone lookups
+        client_ip = get_client_ip(request)
         
         if tool_name == "graphql_introspection":
             result = await handle_introspection()
@@ -1303,10 +1349,10 @@ async def execute_tool_endpoint(request: Request) -> JSONResponse:
                 arguments.get("server"),
                 arguments.get("include_offset", True)
             )
-        elif tool_name == "geo_location":
-            result = await handle_geo_location(
-                arguments.get("ip")
-            )
+        elif tool_name == "ip_info":
+            # Use client IP if no IP specified
+            ip_to_lookup = arguments.get("ip") or client_ip
+            result = await handle_ip_info(ip_to_lookup)
         else:
             return JSONResponse({"error": f"Unknown tool: {tool_name}"}, status_code=400)
         
@@ -1430,14 +1476,14 @@ def create_mcp_server() -> Server:
                 }
             ),
             types.Tool(
-                name="geo_location",
-                description="Get geographic location from IP address using KeyCDN's geo API. Returns country, city, coordinates, timezone, ISP, and more. If no IP is provided, attempts to detect the server's external IP.",
+                name="ip_info",
+                description="Get IP information including timezone, location, and network details using ip-api.com (free, no API key required). Returns timezone with current local time, country, city, coordinates, and ISP info. If no IP is provided, uses the MCP client's IP address. Rate limit: 45 requests/minute.",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "ip": {
                             "type": "string",
-                            "description": "IP address to look up (e.g., '78.31.254.46'). If not provided, uses the server's external IP."
+                            "description": "IP address to look up (e.g., '8.8.8.8'). If not provided, uses your current IP address."
                         }
                     },
                     "required": []
@@ -1480,10 +1526,10 @@ def create_mcp_server() -> Server:
                     arguments.get("server"),
                     arguments.get("include_offset", True)
                 )
-            elif name == "geo_location":
-                result = await handle_geo_location(
-                    arguments.get("ip")
-                )
+            elif name == "ip_info":
+                # Use client IP from context if no IP specified
+                ip_to_lookup = arguments.get("ip") or _client_ip_context.get()
+                result = await handle_ip_info(ip_to_lookup)
             else:
                 return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
             
@@ -1507,6 +1553,10 @@ class AuthenticatedMCPHandler:
         self.session_manager = session_manager
     
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Extract and store client IP in context for tool handlers
+        client_ip = get_client_ip_from_scope(scope)
+        _client_ip_context.set(client_ip)
+        
         if OAUTH_ENABLED:
             # Extract Authorization header
             headers = dict(scope.get("headers", []))
