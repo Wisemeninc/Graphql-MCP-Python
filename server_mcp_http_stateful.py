@@ -266,6 +266,265 @@ async def handle_epoch_to_readable(
     }
 
 
+# NTP Configuration
+NTP_SERVER = os.getenv("NTP_SERVER", "dk.pool.ntp.org")
+NTP_TIMEOUT = float(os.getenv("NTP_TIMEOUT", "5.0"))
+
+# Geo-location Configuration
+GEO_API_URL = "https://tools.keycdn.com/geo"
+GEO_TIMEOUT = float(os.getenv("GEO_TIMEOUT", "10.0"))
+
+
+async def handle_ntp_time(
+    server: str = None,
+    include_offset: bool = True
+) -> dict:
+    """
+    Get accurate time from NTP server.
+    
+    Uses dk.pool.ntp.org by default (configurable via NTP_SERVER env var).
+    Returns NTP time, local time, and offset between them.
+    """
+    import socket
+    import struct
+    
+    ntp_server = server or NTP_SERVER
+    
+    # NTP packet format constants
+    NTP_DELTA = 2208988800  # Seconds between 1900 and 1970
+    
+    try:
+        # Create NTP request packet
+        # LI=0, VN=3, Mode=3 (client), Stratum=0, Poll=0, Precision=0
+        packet = b'\x1b' + 47 * b'\0'
+        
+        # Record local time before request
+        local_before = time.time()
+        
+        # Create UDP socket and send request
+        loop = asyncio.get_event_loop()
+        
+        def sync_ntp_request():
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(NTP_TIMEOUT)
+            try:
+                sock.sendto(packet, (ntp_server, 123))
+                data, _ = sock.recvfrom(1024)
+                return data
+            finally:
+                sock.close()
+        
+        # Run blocking socket operation in executor
+        data = await loop.run_in_executor(None, sync_ntp_request)
+        
+        # Record local time after response
+        local_after = time.time()
+        
+        # Parse NTP response
+        if len(data) < 48:
+            raise ValueError("Invalid NTP response (too short)")
+        
+        # Extract transmit timestamp (bytes 40-47)
+        ntp_seconds = struct.unpack('!I', data[40:44])[0]
+        ntp_fraction = struct.unpack('!I', data[44:48])[0]
+        
+        # Convert NTP time to Unix epoch
+        ntp_time = ntp_seconds - NTP_DELTA + (ntp_fraction / (2**32))
+        
+        # Calculate round-trip delay and offset
+        round_trip = local_after - local_before
+        local_time = (local_before + local_after) / 2
+        offset = ntp_time - local_time
+        
+        # Format times
+        ntp_utc = time.gmtime(ntp_time)
+        local_utc = time.gmtime(local_time)
+        
+        result = {
+            "ntp_server": ntp_server,
+            "ntp_time": {
+                "epoch": ntp_time,
+                "iso8601": time.strftime("%Y-%m-%dT%H:%M:%S", ntp_utc) + f".{int((ntp_time % 1) * 1000):03d}Z",
+                "readable": time.strftime("%Y-%m-%d %H:%M:%S", ntp_utc) + f".{int((ntp_time % 1) * 1000):03d} UTC"
+            },
+            "local_time": {
+                "epoch": local_time,
+                "iso8601": time.strftime("%Y-%m-%dT%H:%M:%S", local_utc) + f".{int((local_time % 1) * 1000):03d}Z",
+                "readable": time.strftime("%Y-%m-%d %H:%M:%S", local_utc) + f".{int((local_time % 1) * 1000):03d} UTC"
+            },
+            "round_trip_ms": round(round_trip * 1000, 2),
+            "status": "success"
+        }
+        
+        if include_offset:
+            result["offset"] = {
+                "seconds": round(offset, 6),
+                "milliseconds": round(offset * 1000, 3),
+                "description": f"Local clock is {abs(offset * 1000):.2f}ms {'behind' if offset > 0 else 'ahead of'} NTP"
+            }
+        
+        logger.info(f"NTP time retrieved from {ntp_server}, offset: {offset*1000:.2f}ms")
+        return result
+        
+    except socket.timeout:
+        logger.warning(f"NTP request to {ntp_server} timed out")
+        return {
+            "ntp_server": ntp_server,
+            "status": "error",
+            "error": f"Timeout connecting to NTP server (>{NTP_TIMEOUT}s)"
+        }
+    except socket.gaierror as e:
+        logger.error(f"NTP DNS resolution failed for {ntp_server}: {e}")
+        return {
+            "ntp_server": ntp_server,
+            "status": "error",
+            "error": f"DNS resolution failed: {str(e)}"
+        }
+    except Exception as e:
+        logger.error(f"NTP error: {e}", exc_info=True)
+        return {
+            "ntp_server": ntp_server,
+            "status": "error",
+            "error": str(e)
+        }
+
+
+async def handle_geo_location(ip_address: str = None) -> dict:
+    """
+    Get geographic location from IP address using KeyCDN's geo API.
+    
+    If no IP is provided, uses the server's external IP.
+    Returns location data including country, city, coordinates, ISP, etc.
+    """
+    try:
+        # Build the API URL
+        url = GEO_API_URL
+        params = {}
+        if ip_address:
+            params["host"] = ip_address
+        
+        timeout = aiohttp.ClientTimeout(total=GEO_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                url,
+                params=params,
+                headers={
+                    "User-Agent": f"{SERVER_NAME}/{SERVER_VERSION}",
+                    "Accept": "application/json"
+                },
+                ssl=None if SSL_VERIFY else False
+            ) as resp:
+                if resp.status != 200:
+                    return {
+                        "status": "error",
+                        "error": f"API returned status {resp.status}",
+                        "ip": ip_address
+                    }
+                
+                # Parse HTML response to extract JSON data
+                # KeyCDN returns HTML with embedded JSON in a specific format
+                content = await resp.text()
+                
+                # Try to find JSON in the response
+                import re
+                
+                # Look for the geo data in the page
+                # KeyCDN embeds data in a specific format
+                json_match = re.search(r'<code[^>]*id="geoResult"[^>]*>([^<]+)</code>', content)
+                if json_match:
+                    try:
+                        geo_data = json.loads(json_match.group(1))
+                    except json.JSONDecodeError:
+                        geo_data = None
+                else:
+                    # Try parsing as direct JSON
+                    try:
+                        geo_data = json.loads(content)
+                    except json.JSONDecodeError:
+                        geo_data = None
+                
+                if not geo_data:
+                    # Fallback: scrape the visible data from HTML
+                    result = {
+                        "status": "success",
+                        "ip": ip_address,
+                        "source": "keycdn",
+                        "raw_response": "HTML response received - use IP lookup API directly"
+                    }
+                    
+                    # Try to extract common fields from HTML
+                    patterns = {
+                        "ip": r'IP Address[^<]*<[^>]+>([^<]+)',
+                        "country": r'Country[^<]*<[^>]+>([^<]+)',
+                        "city": r'City[^<]*<[^>]+>([^<]+)',
+                        "region": r'Region[^<]*<[^>]+>([^<]+)',
+                        "latitude": r'Latitude[^<]*<[^>]+>([\d.-]+)',
+                        "longitude": r'Longitude[^<]*<[^>]+>([\d.-]+)',
+                        "timezone": r'Timezone[^<]*<[^>]+>([^<]+)',
+                        "isp": r'ISP[^<]*<[^>]+>([^<]+)',
+                    }
+                    
+                    for field, pattern in patterns.items():
+                        match = re.search(pattern, content, re.IGNORECASE)
+                        if match:
+                            result[field] = match.group(1).strip()
+                    
+                    logger.info(f"Geo location retrieved for IP: {ip_address or 'auto'}")
+                    return result
+                
+                # Process the JSON data
+                if "data" in geo_data and "geo" in geo_data["data"]:
+                    geo = geo_data["data"]["geo"]
+                else:
+                    geo = geo_data
+                
+                result = {
+                    "status": "success",
+                    "ip": geo.get("ip", ip_address),
+                    "hostname": geo.get("host") or geo.get("rdns"),
+                    "location": {
+                        "country_name": geo.get("country_name"),
+                        "country_code": geo.get("country_code"),
+                        "region_name": geo.get("region_name"),
+                        "region_code": geo.get("region_code"),
+                        "city": geo.get("city"),
+                        "postal_code": geo.get("postal_code"),
+                        "latitude": geo.get("latitude"),
+                        "longitude": geo.get("longitude"),
+                        "timezone": geo.get("timezone"),
+                    },
+                    "network": {
+                        "asn": geo.get("asn"),
+                        "isp": geo.get("isp"),
+                        "organization": geo.get("org") or geo.get("organization"),
+                    },
+                    "source": "keycdn"
+                }
+                
+                # Add coordinates as a convenience field
+                if geo.get("latitude") and geo.get("longitude"):
+                    result["coordinates"] = f"{geo.get('latitude')}, {geo.get('longitude')}"
+                    result["maps_url"] = f"https://www.google.com/maps?q={geo.get('latitude')},{geo.get('longitude')}"
+                
+                logger.info(f"Geo location retrieved for IP: {result['ip']} -> {geo.get('city')}, {geo.get('country_name')}")
+                return result
+                
+    except asyncio.TimeoutError:
+        logger.warning(f"Geo location request timed out for IP: {ip_address}")
+        return {
+            "status": "error",
+            "error": f"Request timed out (>{GEO_TIMEOUT}s)",
+            "ip": ip_address
+        }
+    except Exception as e:
+        logger.error(f"Geo location error: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+            "ip": ip_address
+        }
+
+
 # ============================================================================
 # OAuth 2.1 Authorization Server Endpoints (RFC 8414)
 # ============================================================================
@@ -1011,7 +1270,9 @@ async def list_tools_endpoint(request: Request) -> JSONResponse:
         {"name": "graphql_query", "description": "Execute a GraphQL query"},
         {"name": "graphql_mutation", "description": "Execute a GraphQL mutation"},
         {"name": "graphql_get_schema", "description": "Get GraphQL schema in SDL format"},
-        {"name": "epoch_to_readable", "description": "Convert epoch timestamp to readable format"}
+        {"name": "epoch_to_readable", "description": "Convert epoch timestamp to readable format"},
+        {"name": "ntp_time", "description": "Get accurate time from NTP server (dk.pool.ntp.org)"},
+        {"name": "geo_location", "description": "Get geographic location from IP address"}
     ]
     return JSONResponse({"tools": tools})
 
@@ -1036,6 +1297,15 @@ async def execute_tool_endpoint(request: Request) -> JSONResponse:
                 arguments.get("epoch", 0),
                 arguments.get("format", "%Y-%m-%d %H:%M:%S UTC"),
                 arguments.get("timezone", "UTC")
+            )
+        elif tool_name == "ntp_time":
+            result = await handle_ntp_time(
+                arguments.get("server"),
+                arguments.get("include_offset", True)
+            )
+        elif tool_name == "geo_location":
+            result = await handle_geo_location(
+                arguments.get("ip")
             )
         else:
             return JSONResponse({"error": f"Unknown tool: {tool_name}"}, status_code=400)
@@ -1138,6 +1408,40 @@ def create_mcp_server() -> Server:
                     },
                     "required": ["epoch"]
                 }
+            ),
+            types.Tool(
+                name="ntp_time",
+                description="Get accurate time from NTP (Network Time Protocol) server. Returns precise UTC time from dk.pool.ntp.org and compares with local system time to show clock offset.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "server": {
+                            "type": "string",
+                            "description": "Optional NTP server to query (default: dk.pool.ntp.org). Examples: time.google.com, pool.ntp.org",
+                            "default": "dk.pool.ntp.org"
+                        },
+                        "include_offset": {
+                            "type": "boolean",
+                            "description": "Include local clock offset calculation (default: true)",
+                            "default": True
+                        }
+                    },
+                    "required": []
+                }
+            ),
+            types.Tool(
+                name="geo_location",
+                description="Get geographic location from IP address using KeyCDN's geo API. Returns country, city, coordinates, timezone, ISP, and more. If no IP is provided, attempts to detect the server's external IP.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "ip": {
+                            "type": "string",
+                            "description": "IP address to look up (e.g., '78.31.254.46'). If not provided, uses the server's external IP."
+                        }
+                    },
+                    "required": []
+                }
             )
         ]
     
@@ -1170,6 +1474,15 @@ def create_mcp_server() -> Server:
                     epoch,
                     arguments.get("format", "%Y-%m-%d %H:%M:%S UTC"),
                     arguments.get("timezone", "UTC")
+                )
+            elif name == "ntp_time":
+                result = await handle_ntp_time(
+                    arguments.get("server"),
+                    arguments.get("include_offset", True)
+                )
+            elif name == "geo_location":
+                result = await handle_geo_location(
+                    arguments.get("ip")
                 )
             else:
                 return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
