@@ -2,6 +2,10 @@
 GraphQL MCP Server Version Information
 
 Changelog:
+- v1.5.0: Added query and logon file logging (queries.log, logons.log)
+          Added ip_info tool (ip-api.com, free, no API key)
+          Added web_search tool (DuckDuckGo via ddgs package)
+          Removed geo_location and ip_timezone tools (required API keys)
 - v1.4.0: OAuth 2.1 Authorization Server (RFC 8414, RFC 9728) for MCP client auth
           Added /.well-known/oauth-authorization-server metadata endpoint
           Added /.well-known/oauth-protected-resource endpoint
@@ -14,8 +18,8 @@ Changelog:
 - v1.0.0: Initial release with GraphQL introspection, query, mutation tools
 """
 
-__version__ = "1.4.0"
-__version_info__ = (1, 4, 0)
+__version__ = "1.5.0"
+__version_info__ = (1, 5, 0)
 __author__ = "GraphQL MCP Server Contributors"
 __license__ = "MIT"
 

@@ -5,6 +5,36 @@ All notable changes to the GraphQL MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2025-12-03
+
+### Added
+
+#### Query and Logon File Logging
+- Dedicated file loggers for queries and authentication events
+- Query log (`/app/logs/queries.log`) records all tool calls with:
+  - Tool name, client IP, authenticated user, and arguments
+- Logon log (`/app/logs/logons.log`) records authentication events:
+  - Login success/failure, logout, authorization denied
+  - User, provider, client IP, and status
+- `LOG_DIR` environment variable for log directory (default: `/app/logs`)
+- `QUERY_LOG_ENABLED` to enable/disable query logging (default: `true`)
+- `LOGON_LOG_ENABLED` to enable/disable logon logging (default: `true`)
+- Docker volume mount for persistent logs
+
+#### New Utility Tools
+- `ip_info` tool - Get IP geolocation, timezone, and network info using ip-api.com (free, no API key)
+- `web_search` tool - Search the web using DuckDuckGo (free, no API key)
+
+### Changed
+- Migrated from `duckduckgo-search` to `ddgs` package (upstream rename)
+- Authenticated user context now properly passed to MCP tool handlers
+
+### Removed
+- Removed `geo_location` tool (required API key)
+- Removed `ip_timezone` tool (required API key)
+
+---
+
 ## [1.4.0] - 2025-11-28
 
 ### Added
@@ -205,6 +235,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 1.5.0 | 2025-12-03 | Query/logon file logging, ip_info and web_search tools |
+| 1.4.0 | 2025-11-28 | OAuth 2.1 Authorization Server |
 | 1.0.0 | 2025-11-25 | Initial release with full MCP protocol support |
 
 ---
