@@ -178,6 +178,44 @@ SSL_VERIFY = os.getenv("SSL_VERIFY", "true").lower() != "false"
 if not SSL_VERIFY:
     logger.warning("⚠️  SSL certificate verification is DISABLED - use only in development!")
 
+# Static API Token Configuration (alternative to OAuth)
+# Format: API_TOKENS="token1:user1,token2:user2" or just "token1,token2" for anonymous
+API_TOKENS_ENABLED = os.getenv("API_TOKENS_ENABLED", "false").lower() == "true"
+API_TOKENS: dict[str, str] = {}  # token -> username mapping
+
+if API_TOKENS_ENABLED:
+    tokens_str = os.getenv("API_TOKENS", "")
+    if tokens_str:
+        for token_entry in tokens_str.split(","):
+            token_entry = token_entry.strip()
+            if ":" in token_entry:
+                # Format: token:username
+                token, username = token_entry.split(":", 1)
+                API_TOKENS[token.strip()] = username.strip()
+            else:
+                # Just token, use "api-user" as default username
+                API_TOKENS[token_entry] = "api-user"
+        logger.info(f"API token authentication enabled with {len(API_TOKENS)} token(s)")
+    else:
+        logger.warning("API_TOKENS_ENABLED is true but no API_TOKENS configured")
+        API_TOKENS_ENABLED = False
+
+
+def validate_api_token(auth_header: str) -> tuple[bool, str | None]:
+    """
+    Validate a static API token from Authorization header.
+    Returns (is_valid, username) tuple.
+    """
+    if not API_TOKENS_ENABLED or not auth_header:
+        return False, None
+    
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        if token in API_TOKENS:
+            return True, API_TOKENS[token]
+    
+    return False, None
+
 # CIMD (Client ID Metadata Document) Configuration
 CIMD_ENABLED = os.getenv("CIMD_ENABLED", "true").lower() == "true"
 CIMD_CACHE_TTL = int(os.getenv("CIMD_CACHE_TTL", "86400"))  # 24 hours default
@@ -1506,7 +1544,9 @@ async def health_check(request: Request) -> JSONResponse:
         "server": SERVER_NAME,
         "version": SERVER_VERSION,
         "stateful": True,
-        "auth_enabled": OAUTH_ENABLED,
+        "auth_enabled": OAUTH_ENABLED or API_TOKENS_ENABLED,
+        "oauth_enabled": OAUTH_ENABLED,
+        "api_tokens_enabled": API_TOKENS_ENABLED,
         "oauth_version": "2.1" if OAUTH_ENABLED else None
     })
 
@@ -1784,6 +1824,121 @@ def create_mcp_server() -> Server:
             logger.error(f"Error executing tool {name}: {e}", exc_info=True)
             return [types.TextContent(type="text", text=f"Error: {str(e)}")]
     
+    # ========================================================================
+    # System Prompts
+    # ========================================================================
+    
+    @mcp_app.list_prompts()
+    async def list_prompts() -> list[types.Prompt]:
+        """List available prompts"""
+        return [
+            types.Prompt(
+                name="graphql-assistant",
+                description="System prompt for GraphQL API interaction assistant",
+                arguments=[]
+            ),
+            types.Prompt(
+                name="graphql-explorer",
+                description="System prompt for exploring and discovering GraphQL schemas",
+                arguments=[]
+            )
+        ]
+    
+    @mcp_app.get_prompt()
+    async def get_prompt(name: str, arguments: dict[str, str] | None = None) -> types.GetPromptResult:
+        """Get a specific prompt"""
+        
+        graphql_endpoint = os.getenv("GRAPHQL_ENDPOINT", "configured GraphQL endpoint")
+        
+        if name == "graphql-assistant":
+            return types.GetPromptResult(
+                description="GraphQL API Assistant",
+                messages=[
+                    types.PromptMessage(
+                        role="user",
+                        content=types.TextContent(
+                            type="text",
+                            text=f"""You are a GraphQL API assistant with access to a GraphQL endpoint at: {graphql_endpoint}
+
+You have the following tools available:
+
+## GraphQL Tools
+- **graphql_introspection**: Discover the complete API schema, types, queries, and mutations. Use this FIRST to understand what's available.
+- **graphql_get_schema**: Get the schema in human-readable SDL format. Useful for understanding the data model.
+- **graphql_query**: Execute GraphQL queries to fetch data. Always use proper GraphQL syntax.
+- **graphql_mutation**: Execute GraphQL mutations to modify data. Be careful with mutations as they change data.
+
+## Utility Tools
+- **epoch_to_readable**: Convert Unix timestamps to human-readable dates.
+- **ntp_time**: Get accurate network time from NTP servers.
+- **ip_info**: Get geolocation and timezone info for IP addresses.
+- **web_search**: Search the web using DuckDuckGo for additional context.
+
+## Best Practices
+1. **Always introspect first**: Before querying, use graphql_introspection or graphql_get_schema to understand the available types and fields.
+2. **Use proper GraphQL syntax**: Queries should be valid GraphQL. Include field selections - don't just request a type.
+3. **Handle pagination**: Look for connection patterns (edges/nodes) or limit/offset arguments.
+4. **Use variables**: For dynamic values, use GraphQL variables instead of string interpolation.
+5. **Be specific with fields**: Only request the fields you need to minimize response size.
+
+## Example Query Pattern
+```graphql
+query GetItems($limit: Int) {{
+  items(limit: $limit) {{
+    id
+    name
+    createdAt
+  }}
+}}
+```
+
+When the user asks about the API, start by exploring the schema to understand what's available."""
+                        )
+                    )
+                ]
+            )
+        
+        elif name == "graphql-explorer":
+            return types.GetPromptResult(
+                description="GraphQL Schema Explorer",
+                messages=[
+                    types.PromptMessage(
+                        role="user",
+                        content=types.TextContent(
+                            type="text",
+                            text=f"""You are a GraphQL schema explorer helping users understand and navigate a GraphQL API at: {graphql_endpoint}
+
+Your primary goal is to help users discover and understand the API structure.
+
+## Exploration Strategy
+1. Start with **graphql_get_schema** to get the full SDL schema
+2. Identify the main Query and Mutation types
+3. Look for key entities and their relationships
+4. Note any custom scalars, enums, or input types
+
+## What to Look For
+- **Root Query fields**: Entry points for reading data
+- **Root Mutation fields**: Entry points for writing data
+- **Types and their fields**: The data model
+- **Connections/Edges**: Pagination patterns
+- **Required vs optional fields**: Marked with ! in SDL
+- **Arguments**: Filter, sort, and pagination options
+
+## How to Present Information
+- Summarize the main entities and their purposes
+- Highlight the most useful queries for common tasks
+- Explain relationships between types
+- Provide example queries for key operations
+
+When exploring, be thorough but present information in a digestible way. Focus on what the user is trying to accomplish."""
+                        )
+                    )
+                ]
+            )
+        
+        else:
+            raise ValueError(f"Unknown prompt: {name}")
+    
     return mcp_app
 
 
@@ -1803,35 +1958,59 @@ class AuthenticatedMCPHandler:
         _client_ip_context.set(client_ip)
         _client_user_context.set(None)  # Default to None
         
-        if OAUTH_ENABLED:
+        # Check if any authentication is required
+        if OAUTH_ENABLED or API_TOKENS_ENABLED:
             # Extract Authorization header
             headers = dict(scope.get("headers", []))
             auth_header = headers.get(b"authorization", b"").decode()
             
-            # Validate token using OAuth 2.1 module
-            token_set = validate_bearer_token(auth_header)
+            # Try API token authentication first (faster, no external calls)
+            if API_TOKENS_ENABLED:
+                is_valid, api_user = validate_api_token(auth_header)
+                if is_valid:
+                    _client_user_context.set(api_user)
+                    # Log API token access
+                    log_logon(
+                        event="API_ACCESS",
+                        user=api_user,
+                        provider="api-token",
+                        client_ip=client_ip,
+                        success=True
+                    )
+                    # Pass to session manager - authenticated via API token
+                    await self.session_manager.handle_request(scope, receive, send)
+                    return
             
-            if not token_set:
-                response = JSONResponse(
-                    {"error": "Unauthorized", "login_url": "/auth/login"},
-                    status_code=401
-                )
-                await response(scope, receive, send)
-                return
+            # Try OAuth authentication
+            if OAUTH_ENABLED:
+                token_set = validate_bearer_token(auth_header)
+                
+                if token_set:
+                    # Store authenticated user in context
+                    _client_user_context.set(token_set.username)
+                    
+                    # Check authorization using OAuth 2.1 client
+                    if oauth_client and not oauth_client.is_user_authorized(token_set):
+                        response = JSONResponse(
+                            {"error": "Forbidden", "message": "User not authorized"},
+                            status_code=403
+                        )
+                        await response(scope, receive, send)
+                        return
+                    
+                    # Pass to session manager - authenticated via OAuth
+                    await self.session_manager.handle_request(scope, receive, send)
+                    return
             
-            # Store authenticated user in context
-            _client_user_context.set(token_set.username)
-            
-            # Check authorization using OAuth 2.1 client
-            if oauth_client and not oauth_client.is_user_authorized(token_set):
-                response = JSONResponse(
-                    {"error": "Forbidden", "message": "User not authorized"},
-                    status_code=403
-                )
-                await response(scope, receive, send)
-                return
+            # No valid authentication found
+            response = JSONResponse(
+                {"error": "Unauthorized", "login_url": "/auth/login"},
+                status_code=401
+            )
+            await response(scope, receive, send)
+            return
         
-        # Pass to session manager
+        # No authentication required
         await self.session_manager.handle_request(scope, receive, send)
 
 
@@ -1957,6 +2136,7 @@ def run_server():
     logger.info(f"Log Level: {LOG_LEVEL}")
     logger.info(f"SSL Verify: {SSL_VERIFY}")
     logger.info(f"OAuth 2.1: {'Enabled (' + OAUTH_PROVIDER + ')' if OAUTH_ENABLED else 'Disabled'}")
+    logger.info(f"API Tokens: {'Enabled (' + str(len(API_TOKENS)) + ' tokens)' if API_TOKENS_ENABLED else 'Disabled'}")
     if OAUTH_ENABLED and CIMD_ENABLED:
         logger.info(f"CIMD: Enabled (Client ID Metadata Documents)")
     logger.info("=" * 60)

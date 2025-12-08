@@ -2,7 +2,9 @@
 GraphQL MCP Server Version Information
 
 Changelog:
-- v1.5.0: Added query and logon file logging (queries.log, logons.log)
+- v1.5.0: Added MCP system prompts (graphql-assistant, graphql-explorer)
+          Added API token authentication alongside OAuth 2.1
+          Added query and logon file logging (queries.log, logons.log)
           Added ip_info tool (ip-api.com, free, no API key)
           Added web_search tool (DuckDuckGo via ddgs package)
           Removed geo_location and ip_timezone tools (required API keys)

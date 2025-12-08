@@ -260,6 +260,120 @@ async def handle_mutation(arguments: dict) -> list[TextContent]:
     )]
 
 
+# ============================================================================
+# System Prompts
+# ============================================================================
+
+from mcp.types import Prompt, PromptMessage, GetPromptResult
+
+
+@server.list_prompts()
+async def list_prompts() -> list[Prompt]:
+    """List available prompts"""
+    return [
+        Prompt(
+            name="graphql-assistant",
+            description="System prompt for GraphQL API interaction assistant",
+            arguments=[]
+        ),
+        Prompt(
+            name="graphql-explorer",
+            description="System prompt for exploring and discovering GraphQL schemas",
+            arguments=[]
+        )
+    ]
+
+
+@server.get_prompt()
+async def get_prompt(name: str, arguments: dict[str, str] | None = None) -> GetPromptResult:
+    """Get a specific prompt"""
+    
+    graphql_endpoint = os.getenv("GRAPHQL_ENDPOINT", "configured GraphQL endpoint")
+    
+    if name == "graphql-assistant":
+        return GetPromptResult(
+            description="GraphQL API Assistant",
+            messages=[
+                PromptMessage(
+                    role="user",
+                    content=TextContent(
+                        type="text",
+                        text=f"""You are a GraphQL API assistant with access to a GraphQL endpoint at: {graphql_endpoint}
+
+You have the following tools available:
+
+## GraphQL Tools
+- **graphql_introspection**: Discover the complete API schema, types, queries, and mutations. Use this FIRST to understand what's available.
+- **graphql_get_schema**: Get the schema in human-readable SDL format. Useful for understanding the data model.
+- **graphql_query**: Execute GraphQL queries to fetch data. Always use proper GraphQL syntax.
+- **graphql_mutation**: Execute GraphQL mutations to modify data. Be careful with mutations as they change data.
+
+## Best Practices
+1. **Always introspect first**: Before querying, use graphql_introspection or graphql_get_schema to understand the available types and fields.
+2. **Use proper GraphQL syntax**: Queries should be valid GraphQL. Include field selections - don't just request a type.
+3. **Handle pagination**: Look for connection patterns (edges/nodes) or limit/offset arguments.
+4. **Use variables**: For dynamic values, use GraphQL variables instead of string interpolation.
+5. **Be specific with fields**: Only request the fields you need to minimize response size.
+
+## Example Query Pattern
+```graphql
+query GetItems($limit: Int) {{
+  items(limit: $limit) {{
+    id
+    name
+    createdAt
+  }}
+}}
+```
+
+When the user asks about the API, start by exploring the schema to understand what's available."""
+                    )
+                )
+            ]
+        )
+    
+    elif name == "graphql-explorer":
+        return GetPromptResult(
+            description="GraphQL Schema Explorer",
+            messages=[
+                PromptMessage(
+                    role="user",
+                    content=TextContent(
+                        type="text",
+                        text=f"""You are a GraphQL schema explorer helping users understand and navigate a GraphQL API at: {graphql_endpoint}
+
+Your primary goal is to help users discover and understand the API structure.
+
+## Exploration Strategy
+1. Start with **graphql_get_schema** to get the full SDL schema
+2. Identify the main Query and Mutation types
+3. Look for key entities and their relationships
+4. Note any custom scalars, enums, or input types
+
+## What to Look For
+- **Root Query fields**: Entry points for reading data
+- **Root Mutation fields**: Entry points for writing data
+- **Types and their fields**: The data model
+- **Connections/Edges**: Pagination patterns
+- **Required vs optional fields**: Marked with ! in SDL
+- **Arguments**: Filter, sort, and pagination options
+
+## How to Present Information
+- Summarize the main entities and their purposes
+- Highlight the most useful queries for common tasks
+- Explain relationships between types
+- Provide example queries for key operations
+
+When exploring, be thorough but present information in a digestible way. Focus on what the user is trying to accomplish."""
+                    )
+                )
+            ]
+        )
+    
+    else:
+        raise ValueError(f"Unknown prompt: {name}")
+
+
 async def main():
     """Run the MCP server using stdio transport"""
     from mcp.server.stdio import stdio_server

@@ -5,9 +5,23 @@ All notable changes to the GraphQL MCP Server will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.0] - 2025-12-03
+## [1.5.0] - 2025-12-05
 
 ### Added
+
+#### MCP System Prompts
+- Added two MCP prompts for LLM guidance:
+  - `graphql-assistant` - Comprehensive guide for interacting with the GraphQL API
+  - `graphql-explorer` - Focused on schema exploration and discovery
+- Prompts provide tool descriptions, best practices, and example queries
+- Available via `prompts/list` and `prompts/get` MCP methods
+
+#### API Token Authentication
+- Support for static API tokens alongside OAuth 2.1
+- `API_TOKENS_ENABLED` environment variable to enable token auth (default: `false`)
+- `API_TOKENS` comma-separated list of tokens in format `token:username`
+- Bearer token authentication via `Authorization: Bearer <token>` header
+- Token-based users logged with "api_token" provider
 
 #### Query and Logon File Logging
 - Dedicated file loggers for queries and authentication events
@@ -235,8 +249,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.5.0 | 2025-12-03 | Query/logon file logging, ip_info and web_search tools |
+| 1.5.0 | 2025-12-05 | MCP prompts, API tokens, file logging, ip_info/web_search tools |
 | 1.4.0 | 2025-11-28 | OAuth 2.1 Authorization Server |
+| 1.3.0 | 2025-11-27 | OAuth 2.1 with PKCE, TLS/HTTPS support |
+| 1.2.0 | 2025-11-25 | GitHub OAuth authentication |
+| 1.1.0 | 2025-11-25 | Debug logging, Kubernetes support |
 | 1.0.0 | 2025-11-25 | Initial release with full MCP protocol support |
 
 ---
