@@ -31,11 +31,11 @@ curl http://localhost:8000/health
 curl http://localhost:8000/tools
 ```
 
-See [DOCKER_SSE_GUIDE.md](DOCKER_SSE_GUIDE.md) for full Docker and SSE documentation.
+See [DOCKER_SSE_GUIDE.md](docs/DOCKER_SSE_GUIDE.md) for full Docker and SSE documentation.
 
-See [KUBERNETES_GUIDE.md](KUBERNETES_GUIDE.md) for Kubernetes deployment instructions.
+See [KUBERNETES_GUIDE.md](docs/KUBERNETES_GUIDE.md) for Kubernetes deployment instructions.
 
-See [GITHUB_OAUTH.md](GITHUB_OAUTH.md) for GitHub OAuth authentication setup.
+See [GITHUB_OAUTH.md](docs/GITHUB_OAUTH.md) for GitHub OAuth authentication setup.
 
 ## Installation (Without Docker)
 
@@ -352,6 +352,27 @@ pytest
 ## License
 
 MIT License
+
+## Scripts and Utilities
+
+Helper scripts for setup, testing, and examples are in the [scripts/](scripts/) directory:
+
+- [setup.sh](scripts/setup.sh) - Automated environment setup
+- [run.sh](scripts/run.sh) - Convenience server runner
+- [test_setup.py](scripts/test_setup.py) - Setup verification tool
+- [example_client.py](scripts/example_client.py) - Usage examples
+
+See [scripts/README.md](scripts/README.md) for detailed usage instructions.
+
+## Documentation
+
+For comprehensive documentation, see the [docs/](docs/) directory:
+
+- [Quick Start Guide](docs/QUICKSTART.md)
+- [API Reference](docs/API_REFERENCE.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Changelog](docs/CHANGELOG.md)
+- [Integration Guides](docs/README.md) - Claude Desktop, VS Code, Docker, Kubernetes
 
 ## Support
 

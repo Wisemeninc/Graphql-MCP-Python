@@ -6,7 +6,7 @@ This guide explains how to integrate the GraphQL MCP server with Claude Desktop,
 
 1. **Claude Desktop** installed on your computer
 2. **Python 3.10+** installed
-3. **GraphQL MCP Server** set up (run `./setup.sh` first)
+3. **GraphQL MCP Server** set up (run `./scripts/setup.sh` first)
 
 ## Quick Setup
 
@@ -312,7 +312,7 @@ Build up complex queries step by step:
 
 If you encounter issues:
 
-1. Run `python test_setup.py` to verify your setup
+1. Run `python scripts/test_setup.py` to verify your setup
 2. Check the [README.md](README.md) for general documentation
 3. Review the [API_REFERENCE.md](API_REFERENCE.md) for tool details
 4. Open an issue on GitHub with:

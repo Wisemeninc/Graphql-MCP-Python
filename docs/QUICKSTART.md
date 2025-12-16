@@ -388,10 +388,10 @@ python server_http.py
 
 For issues or questions:
 1. Check the logs for detailed error messages
-2. Verify setup with `python test_setup.py`
+2. Verify setup with `python scripts/test_setup.py`
 3. Review GraphQL API documentation
 4. Open an issue on GitHub
 
 ## Examples
 
-See `example_client.py` for more usage examples and query patterns.
+See `scripts/example_client.py` for more usage examples and query patterns.

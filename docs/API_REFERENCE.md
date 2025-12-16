@@ -5,12 +5,12 @@
 ### Stdio Mode (`server.py`)
 - **Transport**: stdin/stdout
 - **Use Case**: Direct integration with MCP clients (Claude Desktop, Continue, etc.)
-- **Start**: `python server.py` or `./run.sh stdio`
+- **Start**: `python server.py` or `./scripts/run.sh stdio`
 
 ### HTTP/SSE Mode (`server_http.py`)
 - **Transport**: HTTP with Server-Sent Events support
 - **Use Case**: Web-based integrations, HTTP clients
-- **Start**: `python server_http.py` or `./run.sh http`
+- **Start**: `python server_http.py` or `./scripts/run.sh http`
 - **Default Port**: 8000
 
 ---

@@ -220,7 +220,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `setup.sh` - Automated environment setup
 - `run.sh` - Convenience runner script
 - `test_setup.py` - Setup verification tool
-- `example_client.py` - Usage examples and patterns
+- `scripts/example_client.py` - Usage examples and patterns
 - CORS support for browser-based clients
 
 ### Security

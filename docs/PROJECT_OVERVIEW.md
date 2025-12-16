@@ -27,7 +27,7 @@ A complete Model Context Protocol (MCP) server implementation that enables Large
 ├── setup.sh              # Automated setup script
 ├── run.sh                # Server runner script
 ├── test_setup.py         # Setup verification tool
-├── example_client.py     # Usage examples and patterns
+├── scripts/example_client.py     # Usage examples and patterns
 ├── README.md             # Main documentation
 ├── QUICKSTART.md         # Quick start guide
 └── API_REFERENCE.md      # Complete API documentation
@@ -128,13 +128,13 @@ curl -X POST http://localhost:8000/execute \
 ### Stdio Transport
 - **File**: `server.py`
 - **Use Case**: Claude Desktop, Continue, local MCP clients
-- **Command**: `python server.py` or `./run.sh stdio`
+- **Command**: `python server.py` or `./scripts/run.sh stdio`
 - **Communication**: stdin/stdout
 
 ### HTTP/SSE Transport
 - **File**: `server_http.py`
 - **Use Case**: Web applications, remote clients, API integration
-- **Command**: `python server_http.py` or `./run.sh http`
+- **Command**: `python server_http.py` or `./scripts/run.sh http`
 - **Endpoints**:
   - `GET /health` - Health check
   - `GET /tools` - List tools
@@ -173,7 +173,7 @@ python test_setup.py
 - **README.md** - Overview and installation
 - **QUICKSTART.md** - Step-by-step guide
 - **API_REFERENCE.md** - Complete API documentation
-- **example_client.py** - Code examples
+- **scripts/example_client.py** - Code examples
 
 ## 🎯 Use Cases
 
@@ -288,7 +288,7 @@ MIT License - Feel free to use and modify
 
 For issues, questions, or contributions:
 - Check documentation files
-- Review example_client.py
+- Review scripts/example_client.py
 - Run test_setup.py
 - Open GitHub issue
 
