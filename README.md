@@ -177,7 +177,7 @@ python server.py
 
 This mode is suitable for direct integration with MCP clients that communicate via stdin/stdout.
 
-### Option 3: HTTP/SSE Transport (for web-based clients)
+### Option 3: HTTP/SSE Transport (for web-based clients and VS Code)
 
 Run the server with HTTP and Server-Sent Events:
 
@@ -186,6 +186,34 @@ python server_http.py
 ```
 
 The server will start on `http://0.0.0.0:8000` (configurable via environment variables).
+
+#### Configuring VS Code to Use MCP over HTTP
+
+1. **Start the MCP server** (see above or use Docker Compose)
+
+2. **Configure VS Code settings** - Open Settings JSON (`Cmd/Ctrl + ,` → Open Settings JSON icon) and add:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "graphql": {
+        "type": "http",
+        "url": "http://localhost:8000"
+      }
+    }
+  }
+}
+```
+
+3. **Restart VS Code** to load the MCP server
+
+4. **Verify connection** in VS Code terminal:
+```bash
+curl http://localhost:8000/health
+```
+
+For remote servers, use `http://your-server-ip:8000`. For detailed VS Code configuration, network setup, and troubleshooting, see [VSCODE_INTEGRATION.md](docs/VSCODE_INTEGRATION.md).
 
 #### HTTP Endpoints
 

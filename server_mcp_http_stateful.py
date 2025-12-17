@@ -41,6 +41,10 @@ from gql.transport.aiohttp import AIOHTTPTransport
 from graphql import get_introspection_query, build_client_schema, print_schema
 from dotenv import load_dotenv
 import uvicorn
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from event_store import InMemoryEventStore, RedisEventStore
 
@@ -57,11 +61,46 @@ load_dotenv()
 
 # Configure logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
+STRUCTURED_LOGGING = os.getenv("STRUCTURED_LOGGING", "false").lower() == "true"
+
+if STRUCTURED_LOGGING:
+    # Structured JSON logging for SIEM/log aggregation
+    import logging.handlers
+    
+    class JSONFormatter(logging.Formatter):
+        """Format log records as JSON for SIEM integration"""
+        def format(self, record):
+            log_data = {
+                "timestamp": self.formatTime(record, self.datefmt),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+                "module": record.module,
+                "function": record.funcName,
+                "line": record.lineno,
+            }
+            if record.exc_info:
+                log_data["exception"] = self.formatException(record.exc_info)
+            # Add custom fields if present
+            if hasattr(record, "user"):
+                log_data["user"] = record.user
+            if hasattr(record, "client_ip"):
+                log_data["client_ip"] = record.client_ip
+            if hasattr(record, "event_type"):
+                log_data["event_type"] = record.event_type
+            return json.dumps(log_data)
+    
+    handler = logging.StreamHandler()
+    handler.setFormatter(JSONFormatter())
+    logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), handlers=[handler])
+    logger = logging.getLogger(__name__)
+    logger.info("Structured JSON logging enabled")
+else:
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL, logging.INFO),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    logger = logging.getLogger(__name__)
 
 # Reduce noise from third-party loggers
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -161,9 +200,14 @@ OAUTH_PROVIDER = os.getenv("OAUTH_PROVIDER", "github")
 if OAUTH_ENABLED:
     try:
         from oauth21 import (
-            get_oauth_client, get_oauth_config, token_store,
+            get_oauth_client, get_oauth_config, init_token_store,
             validate_bearer_token, OAuth21Client, TokenSet
         )
+        
+        # Initialize token store with Redis if available
+        oauth_redis_url = os.getenv("OAUTH_REDIS_URL") or os.getenv("REDIS_URL")
+        token_store = init_token_store(oauth_redis_url)
+        
         oauth_client = get_oauth_client(OAUTH_PROVIDER)
         if oauth_client:
             logger.info(f"OAuth 2.1 enabled with provider: {OAUTH_PROVIDER}")
@@ -174,30 +218,49 @@ if OAUTH_ENABLED:
         logger.warning(f"OAuth 2.1 module not available: {e}")
         OAUTH_ENABLED = False
         oauth_client = None
+        token_store = None
 
 # SSL Configuration
 SSL_VERIFY = os.getenv("SSL_VERIFY", "true").lower() != "false"
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production").lower()
+
+# SECURITY: Prevent SSL verification bypass in production
+if not SSL_VERIFY and ENVIRONMENT == "production":
+    raise ValueError(
+        "CRITICAL SECURITY ERROR: SSL_VERIFY=false is not allowed in production environment. "
+        "This would expose the system to man-in-the-middle attacks. "
+        "Set ENVIRONMENT=development if this is a development environment."
+    )
+
 if not SSL_VERIFY:
     logger.warning("⚠️  SSL certificate verification is DISABLED - use only in development!")
 
 # Static API Token Configuration (alternative to OAuth)
 # Format: API_TOKENS="token1:user1,token2:user2" or just "token1,token2" for anonymous
 API_TOKENS_ENABLED = os.getenv("API_TOKENS_ENABLED", "false").lower() == "true"
-API_TOKENS: dict[str, str] = {}  # token -> username mapping
+API_TOKEN_EXPIRY = int(os.getenv("API_TOKEN_EXPIRY", "86400"))  # 24 hours default
+API_TOKENS: dict[str, tuple[str, float]] = {}  # token -> (username, expiry_time) mapping
 
 if API_TOKENS_ENABLED:
     tokens_str = os.getenv("API_TOKENS", "")
     if tokens_str:
+        current_time = time.time()
         for token_entry in tokens_str.split(","):
             token_entry = token_entry.strip()
             if ":" in token_entry:
-                # Format: token:username
-                token, username = token_entry.split(":", 1)
-                API_TOKENS[token.strip()] = username.strip()
+                # Format: token:username or token:username:ttl_seconds
+                parts = token_entry.split(":", 2)
+                token = parts[0].strip()
+                username = parts[1].strip()
+                # Optional custom TTL per token
+                ttl = int(parts[2]) if len(parts) > 2 else API_TOKEN_EXPIRY
+                expiry = current_time + ttl
+                API_TOKENS[token] = (username, expiry)
             else:
                 # Just token, use "api-user" as default username
-                API_TOKENS[token_entry] = "api-user"
-        logger.info(f"API token authentication enabled with {len(API_TOKENS)} token(s)")
+                expiry = current_time + API_TOKEN_EXPIRY
+                API_TOKENS[token_entry] = ("api-user", expiry)
+        logger.info(f"API token authentication enabled with {len(API_TOKENS)} token(s), TTL={API_TOKEN_EXPIRY}s")
     else:
         logger.warning("API_TOKENS_ENABLED is true but no API_TOKENS configured")
         API_TOKENS_ENABLED = False
@@ -207,6 +270,7 @@ def validate_api_token(auth_header: str) -> tuple[bool, str | None]:
     """
     Validate a static API token from Authorization header.
     Returns (is_valid, username) tuple.
+    Checks token expiration.
     """
     if not API_TOKENS_ENABLED or not auth_header:
         return False, None
@@ -214,7 +278,12 @@ def validate_api_token(auth_header: str) -> tuple[bool, str | None]:
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
         if token in API_TOKENS:
-            return True, API_TOKENS[token]
+            username, expiry_time = API_TOKENS[token]
+            # Check if token has expired
+            if time.time() > expiry_time:
+                logger.warning(f"Expired API token used: {username}")
+                return False, None
+            return True, username
     
     return False, None
 
@@ -233,6 +302,11 @@ graphql_client: Optional[Client] = None
 # Context variables to store client info for MCP tool calls
 _client_ip_context: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('client_ip', default=None)
 _client_user_context: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('client_user', default=None)
+
+# GraphQL Query Security Limits
+MAX_QUERY_LENGTH = int(os.getenv("MAX_QUERY_LENGTH", "50000"))  # 50KB max
+MAX_QUERY_DEPTH = int(os.getenv("MAX_QUERY_DEPTH", "15"))  # Prevent deeply nested queries
+MAX_QUERY_COMPLEXITY = int(os.getenv("MAX_QUERY_COMPLEXITY", "1000"))  # Complexity score limit
 
 
 def get_client_ip_from_scope(scope: dict) -> Optional[str]:
@@ -300,6 +374,71 @@ def get_graphql_client() -> Client:
 
 
 # ============================================================================
+# Input Validation
+# ============================================================================
+
+def validate_graphql_query(query_str: str) -> None:
+    """Validate GraphQL query for security issues."""
+    if not query_str or not isinstance(query_str, str):
+        raise ValueError("Query must be a non-empty string")
+    
+    # Check query length
+    if len(query_str) > MAX_QUERY_LENGTH:
+        raise ValueError(
+            f"Query too long: {len(query_str)} chars (max: {MAX_QUERY_LENGTH}). "
+            "Split into smaller queries or request a limit increase."
+        )
+    
+    # Check for basic depth using simple brace counting
+    # This is a simple heuristic - for production, use graphql-core AST analysis
+    depth = 0
+    max_depth = 0
+    for char in query_str:
+        if char == '{':
+            depth += 1
+            max_depth = max(max_depth, depth)
+        elif char == '}':
+            depth -= 1
+    
+    if max_depth > MAX_QUERY_DEPTH:
+        raise ValueError(
+            f"Query too deeply nested: {max_depth} levels (max: {MAX_QUERY_DEPTH}). "
+            "This could cause performance issues or DoS."
+        )
+    
+    # Check for suspicious patterns
+    query_lower = query_str.lower()
+    if query_lower.count('fragment') > 50:
+        raise ValueError("Too many fragments in query (max: 50)")
+    
+    logger.debug(f"Query validated: length={len(query_str)}, depth={max_depth}")
+
+
+def validate_string_input(value: str, field_name: str, max_length: int = 1000) -> str:
+    """Validate string input for security."""
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    
+    if len(value) > max_length:
+        raise ValueError(f"{field_name} too long: {len(value)} chars (max: {max_length})")
+    
+    return value.strip()
+
+
+def validate_json_input(value: dict, field_name: str, max_size: int = 10000) -> dict:
+    """Validate JSON/dict input for security."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    
+    # Check serialized size
+    serialized = json.dumps(value)
+    if len(serialized) > max_size:
+        raise ValueError(f"{field_name} too large: {len(serialized)} bytes (max: {max_size})")
+    
+    return value
+
+
+# ============================================================================
 # Tool Handlers
 # ============================================================================
 
@@ -341,6 +480,13 @@ async def handle_query(query_str: str, variables: Optional[dict] = None) -> dict
     if not query_str:
         raise ValueError("query parameter is required")
     
+    # Validate query for security
+    validate_graphql_query(query_str)
+    
+    # Validate variables if provided
+    if variables is not None:
+        variables = validate_json_input(variables, "variables", max_size=50000)
+    
     client = get_graphql_client()
     query = gql(query_str)
     
@@ -359,6 +505,13 @@ async def handle_mutation(mutation_str: str, variables: Optional[dict] = None) -
     """Execute a GraphQL mutation"""
     if not mutation_str:
         raise ValueError("mutation parameter is required")
+    
+    # Validate mutation for security
+    validate_graphql_query(mutation_str)
+    
+    # Validate variables if provided
+    if variables is not None:
+        variables = validate_json_input(variables, "variables", max_size=50000)
     
     client = get_graphql_client()
     mutation = gql(mutation_str)
@@ -820,8 +973,12 @@ def is_cimd_client_id(client_id: str) -> bool:
 
 def is_safe_cimd_url(url: str) -> bool:
     """
-    Validate URL is safe to fetch (prevent SSRF attacks).
-    Block internal/private IP ranges and localhost.
+    Enhanced SSRF protection for CIMD URL validation.
+    Blocks:
+    - Private/internal IP ranges (IPv4 and IPv6)
+    - Localhost variations
+    - Internal TLDs (.local, .internal, .corp)
+    - DNS rebinding attacks (double resolution check)
     """
     try:
         from urllib.parse import urlparse
@@ -831,22 +988,97 @@ def is_safe_cimd_url(url: str) -> bool:
         parsed = urlparse(url)
         hostname = parsed.netloc.split(':')[0]
         
-        # Block localhost variations
-        if hostname.lower() in ('localhost', '127.0.0.1', '::1', '0.0.0.0'):
+        # Block localhost variations (IPv4 and IPv6)
+        localhost_names = ('localhost', '127.0.0.1', '::1', '0.0.0.0', '[::]', '[::1]')
+        if hostname.lower() in localhost_names:
+            logger.warning(f"CIMD URL blocked - localhost: {hostname}")
             return False
         
-        # Try to resolve hostname and check if it's a private IP
-        try:
-            ip = socket.gethostbyname(hostname)
-            ip_obj = ipaddress.ip_address(ip)
-            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_reserved:
+        # Block common internal TLDs
+        internal_tlds = ('.local', '.internal', '.corp', '.lan', '.home', '.intranet')
+        if any(hostname.lower().endswith(tld) for tld in internal_tlds):
+            logger.warning(f"CIMD URL blocked - internal TLD: {hostname}")
+            return False
+        
+        # DNS resolution check (both IPv4 and IPv6)
+        def check_ip_safety(ip_str: str) -> bool:
+            """Check if an IP address is safe (not private/internal)"""
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+                # Check for private, loopback, reserved, link-local, multicast
+                if (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_reserved or
+                    ip_obj.is_link_local or ip_obj.is_multicast):
+                    return False
+                # Block carrier-grade NAT (100.64.0.0/10)
+                if isinstance(ip_obj, ipaddress.IPv4Address):
+                    if ip_obj in ipaddress.IPv4Network('100.64.0.0/10'):
+                        return False
+                # Block IPv6 ULA (fc00::/7)
+                if isinstance(ip_obj, ipaddress.IPv6Address):
+                    if ip_obj in ipaddress.IPv6Network('fc00::/7'):
+                        return False
+                return True
+            except ValueError:
                 return False
-        except socket.gaierror:
-            # Can't resolve - might be valid, let the fetch fail
-            pass
+        
+        # Try to resolve hostname (both IPv4 and IPv6)
+        try:
+            # First resolution
+            ip_list_1 = set()
+            try:
+                ipv4 = socket.gethostbyname(hostname)
+                ip_list_1.add(ipv4)
+            except socket.gaierror:
+                pass
+            
+            # Get all addresses including IPv6
+            try:
+                addr_info = socket.getaddrinfo(hostname, None)
+                for addr in addr_info:
+                    ip_list_1.add(addr[4][0])
+            except socket.gaierror:
+                pass
+            
+            if not ip_list_1:
+                logger.warning(f"CIMD URL blocked - cannot resolve: {hostname}")
+                return False
+            
+            # Check all resolved IPs are safe
+            for ip in ip_list_1:
+                if not check_ip_safety(ip):
+                    logger.warning(f"CIMD URL blocked - private IP {ip}: {hostname}")
+                    return False
+            
+            # DNS rebinding protection: resolve again after short delay
+            import time
+            time.sleep(0.1)
+            
+            ip_list_2 = set()
+            try:
+                ipv4 = socket.gethostbyname(hostname)
+                ip_list_2.add(ipv4)
+            except socket.gaierror:
+                pass
+            
+            try:
+                addr_info = socket.getaddrinfo(hostname, None)
+                for addr in addr_info:
+                    ip_list_2.add(addr[4][0])
+            except socket.gaierror:
+                pass
+            
+            # Check second resolution is consistent
+            if ip_list_2 and ip_list_2 != ip_list_1:
+                logger.warning(f"CIMD URL blocked - DNS rebinding detected: {hostname}")
+                return False
+            
+        except Exception as e:
+            logger.warning(f"CIMD URL validation error for {hostname}: {e}")
+            return False
         
         return True
-    except Exception:
+    except Exception as e:
+        logger.error(f"CIMD URL safety check failed: {e}")
         return False
 
 
@@ -1064,6 +1296,9 @@ async def oauth_authorize(request: Request) -> Response:
     - Traditional client_id (string)
     - CIMD client_id (HTTPS URL) per draft-parecki-oauth-client-id-metadata-document
     """
+    limiter = request.app.state.limiter
+    await limiter.check_request_limit(request, "10/minute")  # Prevent auth spam
+    
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
     
@@ -1136,6 +1371,9 @@ async def oauth_token(request: Request) -> JSONResponse:
     OAuth 2.1 Token endpoint.
     Exchanges authorization code for tokens.
     """
+    limiter = request.app.state.limiter
+    await limiter.check_request_limit(request, "20/minute")  # Prevent token abuse
+    
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
     
@@ -1232,6 +1470,9 @@ async def auth_login(request: Request) -> Response:
         redirect_uri: Optional URI to redirect user after authentication
         provider: OAuth provider (default: from OAUTH_PROVIDER env var)
     """
+    limiter = request.app.state.limiter
+    await limiter.check_request_limit(request, "10/minute")  # Prevent auth abuse
+    
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
     
@@ -1555,6 +1796,9 @@ async def health_check(request: Request) -> JSONResponse:
 
 
 async def list_tools_endpoint(request: Request) -> JSONResponse:
+    limiter = request.app.state.limiter
+    await limiter.check_request_limit(request, "60/minute")
+    
     tools = [
         {"name": "graphql_introspection", "description": "Perform GraphQL introspection"},
         {"name": "graphql_query", "description": "Execute a GraphQL query"},
@@ -1570,6 +1814,9 @@ async def list_tools_endpoint(request: Request) -> JSONResponse:
 
 async def execute_tool_endpoint(request: Request) -> JSONResponse:
     """Direct tool execution endpoint for testing"""
+    limiter = request.app.state.limiter
+    await limiter.check_request_limit(request, "30/minute")  # Stricter for execution
+    
     try:
         body = await request.json()
         tool_name = body.get("tool")
@@ -2018,11 +2265,74 @@ class AuthenticatedMCPHandler:
 
 
 # ============================================================================
+# Security Headers Middleware
+# ============================================================================
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """
+    Add security headers to all responses.
+    
+    Headers added:
+    - Strict-Transport-Security (HSTS)
+    - X-Content-Type-Options
+    - X-Frame-Options
+    - X-XSS-Protection
+    - Content-Security-Policy (CSP)
+    - Referrer-Policy
+    - Permissions-Policy
+    """
+    
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        
+        # HSTS - Force HTTPS (only add in production with HTTPS)
+        if ENVIRONMENT == "production":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+        
+        # Prevent MIME type sniffing
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        
+        # Prevent clickjacking
+        response.headers["X-Frame-Options"] = "DENY"
+        
+        # XSS protection (legacy, but doesn't hurt)
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        
+        # Content Security Policy
+        csp_policy = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; "
+            "font-src 'self' data:; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+        response.headers["Content-Security-Policy"] = csp_policy
+        
+        # Referrer policy
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        
+        # Permissions policy (restrict access to browser features)
+        response.headers["Permissions-Policy"] = (
+            "geolocation=(), microphone=(), camera=(), payment=(), usb=(), "
+            "magnetometer=(), gyroscope=(), accelerometer=()"
+        )
+        
+        return response
+
+
+# ============================================================================
 # Application Factory
 # ============================================================================
 
 def create_app() -> Starlette:
     """Create the Starlette application with MCP session manager"""
+    
+    # Initialize rate limiter
+    limiter = Limiter(key_func=get_remote_address)
     
     # Create MCP server
     mcp_server = create_mcp_server()
@@ -2107,10 +2417,34 @@ def create_app() -> Starlette:
         lifespan=lifespan
     )
     
-    # Wrap with CORS middleware
+    # Add rate limit exception handler
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    
+    # Store limiter in app state for route access
+    app.state.limiter = limiter
+    
+    # Add security headers middleware
+    app.add_middleware(SecurityHeadersMiddleware)
+    
+    # Wrap with CORS middleware - SECURITY: Restrict origins
+    allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "")
+    if allowed_origins_str:
+        allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
+    else:
+        # Default to localhost in development, block all in production
+        if ENVIRONMENT == "production":
+            logger.warning(
+                "⚠️  SECURITY WARNING: ALLOWED_ORIGINS not set in production. "
+                "CORS will block all cross-origin requests. Set ALLOWED_ORIGINS environment variable."
+            )
+            allowed_origins = []
+        else:
+            allowed_origins = ["http://localhost:*", "http://127.0.0.1:*"]
+            logger.info(f"Development mode: CORS allowing localhost origins")
+    
     app = CORSMiddleware(
         app,
-        allow_origins=["*"],
+        allow_origins=allowed_origins if allowed_origins else ["http://localhost:3000"],
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["*"],

@@ -311,8 +311,189 @@ class OAuth21TokenStore:
         return self._auth_codes.pop(code, None)
 
 
-# Global token store
-token_store = OAuth21TokenStore()
+class RedisOAuth21TokenStore(OAuth21TokenStore):
+    """
+    Redis-backed OAuth 2.1 token store for production deployments.
+    
+    Provides:
+    - Distributed storage across multiple instances
+    - Persistence across restarts
+    - Automatic expiration via Redis TTL
+    - Better scalability
+    """
+    
+    def __init__(self, redis_url: str):
+        """Initialize Redis connection"""
+        try:
+            import redis
+            self.redis = redis.from_url(redis_url, decode_responses=True)
+            # Test connection
+            self.redis.ping()
+            logger.info("Redis token store initialized successfully")
+        except ImportError:
+            raise ImportError("redis package required for RedisOAuth21TokenStore. Install with: pip install redis")
+        except Exception as e:
+            raise ConnectionError(f"Failed to connect to Redis: {e}")
+    
+    def _serialize_auth_request(self, req: AuthorizationRequest) -> str:
+        """Serialize auth request to JSON"""
+        data = asdict(req)
+        return json.dumps(data)
+    
+    def _deserialize_auth_request(self, data: str) -> AuthorizationRequest:
+        """Deserialize auth request from JSON"""
+        obj = json.loads(data)
+        return AuthorizationRequest(**obj)
+    
+    def _serialize_token_set(self, token: TokenSet) -> str:
+        """Serialize token set to JSON"""
+        data = asdict(token)
+        return json.dumps(data)
+    
+    def _deserialize_token_set(self, data: str) -> TokenSet:
+        """Deserialize token set from JSON"""
+        obj = json.loads(data)
+        return TokenSet(**obj)
+    
+    def store_auth_request(self, request: AuthorizationRequest) -> None:
+        """Store auth request in Redis with 5 minute TTL"""
+        key = f"oauth:auth_request:{request.state}"
+        self.redis.setex(key, 300, self._serialize_auth_request(request))
+    
+    def get_auth_request(self, state: str) -> Optional[AuthorizationRequest]:
+        """Get and delete auth request from Redis"""
+        key = f"oauth:auth_request:{state}"
+        data = self.redis.get(key)
+        if data:
+            self.redis.delete(key)
+            return self._deserialize_auth_request(data)
+        return None
+    
+    def store_token(self, token_set: TokenSet) -> None:
+        """Store token set in Redis with TTL"""
+        # Store access token
+        access_key = f"oauth:token:{token_set.access_token}"
+        ttl = int(token_set.expires_at - time.time())
+        if ttl > 0:
+            self.redis.setex(access_key, ttl, self._serialize_token_set(token_set))
+        
+        # Store refresh token mapping
+        if token_set.refresh_token:
+            refresh_key = f"oauth:refresh:{token_set.refresh_token}"
+            refresh_ttl = int(token_set.refresh_expires_at - time.time()) if token_set.refresh_expires_at else 86400 * 30
+            if refresh_ttl > 0:
+                self.redis.setex(refresh_key, refresh_ttl, token_set.access_token)
+    
+    def get_token(self, access_token: str) -> Optional[TokenSet]:
+        """Get token from Redis"""
+        key = f"oauth:token:{access_token}"
+        data = self.redis.get(key)
+        if data:
+            token_set = self._deserialize_token_set(data)
+            # Double-check expiration
+            if time.time() <= token_set.expires_at:
+                return token_set
+        return None
+    
+    def get_token_by_refresh(self, refresh_token: str) -> Optional[TokenSet]:
+        """Get token by refresh token"""
+        refresh_key = f"oauth:refresh:{refresh_token}"
+        access_token = self.redis.get(refresh_key)
+        if access_token:
+            return self.get_token(access_token)
+        return None
+    
+    def revoke_token(self, token: str) -> bool:
+        """Revoke token from Redis"""
+        # Try as access token
+        access_key = f"oauth:token:{token}"
+        if self.redis.exists(access_key):
+            data = self.redis.get(access_key)
+            if data:
+                token_set = self._deserialize_token_set(data)
+                if token_set.refresh_token:
+                    refresh_key = f"oauth:refresh:{token_set.refresh_token}"
+                    self.redis.delete(refresh_key)
+            self.redis.delete(access_key)
+            return True
+        
+        # Try as refresh token
+        refresh_key = f"oauth:refresh:{token}"
+        if self.redis.exists(refresh_key):
+            access_token = self.redis.get(refresh_key)
+            if access_token:
+                self.redis.delete(f"oauth:token:{access_token}")
+            self.redis.delete(refresh_key)
+            return True
+        
+        return False
+    
+    def rotate_refresh_token(self, old_refresh_token: str, new_token_set: TokenSet) -> bool:
+        """Rotate refresh token"""
+        refresh_key = f"oauth:refresh:{old_refresh_token}"
+        if not self.redis.exists(refresh_key):
+            return False
+        
+        # Get old access token and delete it
+        old_access_token = self.redis.get(refresh_key)
+        if old_access_token:
+            self.redis.delete(f"oauth:token:{old_access_token}")
+        self.redis.delete(refresh_key)
+        
+        # Store new token set
+        self.store_token(new_token_set)
+        return True
+    
+    def store_token_with_code(self, code: str, token_set: TokenSet) -> None:
+        """Store token with authorization code"""
+        key = f"oauth:code:{code}"
+        self.redis.setex(key, 300, self._serialize_token_set(token_set))
+    
+    def get_token_by_code(self, code: str) -> Optional[TokenSet]:
+        """Get token by code (doesn't consume)"""
+        key = f"oauth:code:{code}"
+        data = self.redis.get(key)
+        if data:
+            return self._deserialize_token_set(data)
+        return None
+    
+    def consume_code(self, code: str) -> Optional[TokenSet]:
+        """Consume authorization code (one-time use)"""
+        key = f"oauth:code:{code}"
+        data = self.redis.get(key)
+        if data:
+            self.redis.delete(key)
+            return self._deserialize_token_set(data)
+        return None
+
+
+# Global token store (will be initialized based on environment)
+token_store = None
+
+
+def init_token_store(redis_url: str = None) -> OAuth21TokenStore:
+    """
+    Initialize token store with Redis if available, otherwise in-memory.
+    
+    Args:
+        redis_url: Redis connection URL (e.g., redis://localhost:6379/0)
+    
+    Returns:
+        Initialized token store
+    """
+    global token_store
+    
+    if redis_url:
+        try:
+            token_store = RedisOAuth21TokenStore(redis_url)
+            logger.info(f"Using Redis token store: {redis_url}")
+            return token_store
+        except Exception as e:
+            logger.warning(f"Failed to initialize Redis token store: {e}. Falling back to in-memory.")
+    
+    token_store = OAuth21TokenStore()
+    logger.info("Using in-memory token store (not recommended for production)")
+    return token_store
 
 
 # ============================================================================
