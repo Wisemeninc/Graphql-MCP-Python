@@ -23,6 +23,8 @@ import asyncio
 import contextvars
 from typing import Any, Optional
 from collections.abc import AsyncIterator
+from zoneinfo import ZoneInfo
+from datetime import datetime
 
 import aiohttp
 import mcp.types as types
@@ -383,19 +385,20 @@ async def handle_epoch_to_readable(
     if timezone == "UTC":
         readable = time.strftime(format_str, utc_time)
     else:
-        original_tz = os.environ.get("TZ")
+        # For non-UTC timezones, use zoneinfo for safe timezone handling
         try:
-            os.environ["TZ"] = timezone
-            time.tzset()
-            local_time = time.localtime(epoch)
+            # ZoneInfo validates against system timezone database
+            tz = ZoneInfo(timezone)
+
+            # Convert epoch to timezone-aware datetime
+            dt = datetime.fromtimestamp(epoch, tz=tz)
+
+            # Adjust format string if it contains UTC but we're not in UTC
             adjusted_format = format_str.replace(" UTC", f" {timezone}").replace("UTC", timezone)
-            readable = time.strftime(adjusted_format, local_time)
-        finally:
-            if original_tz:
-                os.environ["TZ"] = original_tz
-            else:
-                os.environ.pop("TZ", None)
-            time.tzset()
+            readable = dt.strftime(adjusted_format)
+        except Exception as e:
+            # Catch ZoneInfoNotFoundError and other timezone-related errors
+            raise ValueError(f"Invalid timezone '{timezone}': {str(e)}")
     
     return {
         "epoch": epoch,
