@@ -1,5 +1,5 @@
 # Use Python 3.12 slim image
-FROM python:3.15-rc-alpine3.22
+FROM python:3.12-alpine
 
 # Set working directory
 WORKDIR /app
@@ -10,10 +10,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies and build tools
+RUN apk add --no-cache \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    gcc \
+    musl-dev \
+    libgcc \
+    libffi-dev \
+    python3-dev \
+    libxml2-dev \
+    libxslt-dev
 
 # Copy requirements first for better caching
 COPY requirements.txt .
@@ -30,7 +36,7 @@ COPY oauth21.py .
 
 # Create logs directory and non-root user for security
 RUN mkdir -p /app/logs && \
-    useradd --create-home --shell /bin/bash appuser && \
+    adduser -D -h /home/appuser -s /bin/sh appuser && \
     chown -R appuser:appuser /app
 USER appuser
 
