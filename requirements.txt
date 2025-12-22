@@ -26,3 +26,4 @@ secure>=0.3.0
 
 # Web search (ddgs is the new name for duckduckgo-search)
 ddgs>=9.0.0
+zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
