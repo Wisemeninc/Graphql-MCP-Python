@@ -488,7 +488,23 @@ async def handle_query(query_str: str, variables: Optional[dict] = None) -> dict
         variables = validate_json_input(variables, "variables", max_size=50000)
     
     client = get_graphql_client()
-    query = gql(query_str)
+    
+    try:
+        query = gql(query_str)
+    except Exception as e:
+        # Provide helpful error message for syntax errors
+        error_msg = str(e)
+        if "... on" in query_str and ("Expected '{'" in error_msg or "Expected '{'," in error_msg):
+            raise ValueError(
+                f"GraphQL Syntax Error: {error_msg}\n\n"
+                "Inline fragments must have a selection set. Example:\n"
+                "  ... on TypeName {\n"
+                "    field1\n"
+                "    field2\n"
+                "  }\n\n"
+                f"Your query:\n{query_str}"
+            )
+        raise ValueError(f"GraphQL Syntax Error: {error_msg}")
     
     async with client as session:
         result = await session.execute(query, variable_values=variables or {})
@@ -514,7 +530,23 @@ async def handle_mutation(mutation_str: str, variables: Optional[dict] = None) -
         variables = validate_json_input(variables, "variables", max_size=50000)
     
     client = get_graphql_client()
-    mutation = gql(mutation_str)
+    
+    try:
+        mutation = gql(mutation_str)
+    except Exception as e:
+        # Provide helpful error message for syntax errors
+        error_msg = str(e)
+        if "... on" in mutation_str and ("Expected '{'" in error_msg or "Expected '{'," in error_msg):
+            raise ValueError(
+                f"GraphQL Syntax Error: {error_msg}\n\n"
+                "Inline fragments must have a selection set. Example:\n"
+                "  ... on TypeName {\n"
+                "    field1\n"
+                "    field2\n"
+                "  }\n\n"
+                f"Your mutation:\n{mutation_str}"
+            )
+        raise ValueError(f"GraphQL Syntax Error: {error_msg}")
     
     async with client as session:
         result = await session.execute(mutation, variable_values=variables or {})
