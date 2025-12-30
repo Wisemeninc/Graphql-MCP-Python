@@ -16,7 +16,7 @@ resources:
 
 commonLabels:
   app.kubernetes.io/name: graphql-mcp-server
-  app.kubernetes.io/version: "1.0.0"
+  app.kubernetes.io/version: "1.5.0"
   app.kubernetes.io/managed-by: kustomize
 
 # Uncomment to override image for different environments

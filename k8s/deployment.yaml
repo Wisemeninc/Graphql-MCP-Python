@@ -6,7 +6,7 @@ metadata:
   labels:
     app: graphql-mcp-server
     app.kubernetes.io/name: graphql-mcp-server
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.5.0"
 spec:
   replicas: 2
   selector:
@@ -17,7 +17,7 @@ spec:
       labels:
         app: graphql-mcp-server
         app.kubernetes.io/name: graphql-mcp-server
-        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/version: "1.5.0"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -65,6 +65,16 @@ spec:
             capabilities:
               drop:
                 - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: logs
+              mountPath: /app/logs
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
       # Uncomment for private registries
       # imagePullSecrets:
       #   - name: registry-credentials

@@ -5,8 +5,8 @@ metadata:
   namespace: graphql-mcp
   labels:
     app: graphql-mcp-server
+    app.kubernetes.io/version: "1.5.0"
   annotations:
-    kubernetes.io/ingress.class: nginx
     # Uncomment for automatic TLS with cert-manager
     # cert-manager.io/cluster-issuer: letsencrypt-prod
     # Required for SSE long-lived connections
@@ -14,6 +14,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
 spec:
+  ingressClassName: nginx
   # Uncomment for TLS
   # tls:
   #   - hosts:

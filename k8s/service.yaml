@@ -6,7 +6,7 @@ metadata:
   labels:
     app: graphql-mcp-server
     app.kubernetes.io/name: graphql-mcp-server
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.5.0"
 spec:
   type: ClusterIP
   ports:

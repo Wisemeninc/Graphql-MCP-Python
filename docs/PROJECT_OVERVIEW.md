@@ -4,48 +4,83 @@
 
 A complete Model Context Protocol (MCP) server implementation that enables Large Language Models (LLMs) to interact with GraphQL APIs. Built with Python, featuring both stdio and HTTP/SSE transports for maximum flexibility.
 
+**Current Version:** 1.5.0
+
 ## ✨ Key Features
 
+### Core GraphQL Tools
 - ✅ **GraphQL Introspection**: Automatically discover API schema, types, and operations
 - ✅ **Query Execution**: Execute GraphQL queries with full variable support
 - ✅ **Mutation Support**: Modify data through GraphQL mutations
 - ✅ **Schema Retrieval**: Get human-readable SDL format schemas
 - ✅ **Query Transparency**: Every response includes the query used and result
+
+### Utility Tools
+- ✅ **Epoch Converter**: Convert Unix timestamps to human-readable date/time
+- ✅ **NTP Time**: Get accurate time from NTP servers
+- ✅ **IP Info**: Get IP geolocation and timezone (via ip-api.com)
+- ✅ **Web Search**: Search the web via DuckDuckGo (no API key needed)
+
+### Infrastructure
 - ✅ **Dual Transport**: stdio for local clients, HTTP/SSE for web integration
-- ✅ **Authentication**: Bearer token and custom header support
-- ✅ **Production Ready**: Error handling, logging, and environment configuration
+- ✅ **OAuth 2.1 Authentication**: GitHub OAuth with PKCE support
+- ✅ **API Token Auth**: Simple token-based authentication
+- ✅ **MCP System Prompts**: Built-in prompts for GraphQL assistance
+- ✅ **Query Logging**: Audit logging for queries and authentication
+- ✅ **Production Ready**: Rate limiting, structured logging, error handling
 
 ## 📁 Project Structure
 
 ```
-/github/Graphql_MCP/
-├── server.py              # Main MCP server with stdio transport
-├── server_http.py         # HTTP/SSE server implementation
-├── requirements.txt       # Python dependencies
-├── .env.example          # Environment configuration template
-├── .gitignore            # Git ignore rules
-├── setup.sh              # Automated setup script
-├── run.sh                # Server runner script
-├── test_setup.py         # Setup verification tool
-├── scripts/example_client.py     # Usage examples and patterns
-├── README.md             # Main documentation
-├── QUICKSTART.md         # Quick start guide
-└── API_REFERENCE.md      # Complete API documentation
+Graphql-MCP-Python/
+├── server.py                      # MCP server with stdio transport
+├── server_mcp_http_stateful.py    # HTTP/SSE server (stateful, recommended)
+├── event_store.py                 # Event storage (in-memory/Redis)
+├── oauth21.py                     # OAuth 2.1 implementation
+├── version.py                     # Version information
+├── requirements.txt               # Python dependencies
+├── Dockerfile                     # Docker container definition
+├── docker-compose.yml             # Docker Compose configuration
+├── .env.example                   # Environment configuration template
+├── README.md                      # Main documentation
+├── docs/                          # Extended documentation
+│   ├── API_REFERENCE.md
+│   ├── ARCHITECTURE.md
+│   ├── DOCKER_SSE_GUIDE.md
+│   ├── GITHUB_OAUTH.md
+│   ├── KUBERNETES_GUIDE.md
+│   ├── QUICKSTART.md
+│   └── VSCODE_INTEGRATION.md
+├── k8s/                           # Kubernetes manifests
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   ├── configmap.yaml
+│   ├── secret.yaml
+│   ├── hpa.yaml
+│   ├── ingress.yaml
+│   └── networkpolicy.yaml
+├── scripts/                       # Helper scripts
+│   ├── setup.sh
+│   ├── run.sh
+│   ├── test_setup.py
+│   └── example_client.py
+└── logs/                          # Log files (queries.log, logons.log)
 ```
 
 ## 🚀 Quick Start
 
 ```bash
 # 1. Setup
-./setup.sh
+./scripts/setup.sh
 
 # 2. Configure
+cp .env.example .env
 nano .env  # Add your GRAPHQL_ENDPOINT
 
 # 3. Run
-./run.sh http    # HTTP/SSE mode
+python server_mcp_http_stateful.py    # HTTP/SSE mode
 # or
-./run.sh stdio   # stdio mode
+python server.py                       # stdio mode
 ```
 
 ## 🔧 Available Tools
@@ -56,18 +91,25 @@ nano .env  # Add your GRAPHQL_ENDPOINT
 | `graphql_get_schema` | Get SDL format schema | None | Human-readable schema |
 | `graphql_query` | Execute queries | query, variables | Query + Result |
 | `graphql_mutation` | Execute mutations | mutation, variables | Mutation + Result |
+| `epoch_to_readable` | Convert timestamps | epoch, format, timezone | Formatted date/time |
+| `ntp_time` | Get accurate time | server, include_offset | NTP time + offset |
+| `ip_info` | Get IP geolocation | ip (optional) | Location, timezone, ISP |
+| `web_search` | Search the web | query, max_results | Search results |
 
 ## 📦 Dependencies
 
-- `mcp>=0.9.0` - Model Context Protocol SDK
-- `gql>=3.5.0` - GraphQL client
-- `graphql-core>=3.2.3` - GraphQL implementation
-- `aiohttp>=3.9.0` - Async HTTP client
-- `starlette>=0.35.0` - Web framework
-- `uvicorn>=0.25.0` - ASGI server
-- `sse-starlette>=2.0.0` - Server-Sent Events
-- `python-dotenv>=1.0.0` - Environment management
-- `pydantic>=2.5.0` - Data validation
+- `mcp>=1.22.0` - Model Context Protocol SDK
+- `gql>=4.0.0` - GraphQL client
+- `graphql-core>=3.2.7` - GraphQL implementation
+- `aiohttp>=3.13.0` - Async HTTP client
+- `starlette>=0.50.0` - Web framework
+- `uvicorn>=0.38.0` - ASGI server
+- `sse-starlette>=3.0.0` - Server-Sent Events
+- `python-dotenv>=1.2.0` - Environment management
+- `pydantic>=2.12.0` - Data validation
+- `redis>=5.0.0` - Redis client (for distributed sessions)
+- `slowapi>=0.1.9` - Rate limiting
+- `ddgs>=9.0.0` - DuckDuckGo search
 
 ## 🎮 Usage Examples
 

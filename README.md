@@ -2,17 +2,31 @@
 
 A Model Context Protocol (MCP) server that enables LLMs to interact with GraphQL APIs. This server provides tools for introspection, querying, and mutating data through GraphQL endpoints.
 
+**Current Version:** 1.5.0
+
 ## Features
 
+### Core GraphQL Tools
 - **GraphQL Introspection**: Discover schema, types, queries, mutations, and fields
 - **Query Execution**: Execute GraphQL queries with variables
 - **Mutation Support**: Perform data modifications through GraphQL mutations
 - **Schema Retrieval**: Get human-readable schema in SDL format
 - **Query Transparency**: Every response includes the query/mutation used and the result
+
+### Utility Tools
+- **Epoch Converter**: Convert Unix timestamps to human-readable date/time with timezone support
+- **NTP Time**: Get accurate time from NTP servers with clock offset calculation
+- **IP Info**: Get IP geolocation, timezone, and network details (via ip-api.com, free)
+- **Web Search**: Search the web using DuckDuckGo (free, no API key required)
+
+### Infrastructure
 - **Multiple Transports**: Supports both stdio and HTTP/SSE transports
 - **Docker Support**: Run in containers with Docker and Docker Compose
 - **Kubernetes Ready**: Full K8s manifests with HPA, Network Policies, and more
-- **GitHub OAuth**: Optional authentication with user/org-based access control
+- **OAuth 2.1 Authentication**: GitHub OAuth with user/org-based access control
+- **API Token Auth**: Simple token-based authentication option
+- **MCP System Prompts**: Built-in prompts for GraphQL assistance
+- **Query Logging**: Audit logging for queries and authentication events
 
 ## Quick Start with Docker
 
@@ -65,15 +79,31 @@ Create a `.env` file with the following variables:
 # Required: Your GraphQL endpoint
 GRAPHQL_ENDPOINT=https://api.example.com/graphql
 
-# Optional: Authentication token
+# Optional: Authentication token for GraphQL API
 GRAPHQL_AUTH_TOKEN=your_bearer_token_here
 
-# Optional: Custom headers as JSON
+# Optional: Custom headers as JSON for GraphQL API
 GRAPHQL_HEADERS={"X-Custom-Header": "value"}
 
 # Optional: HTTP server configuration (for HTTP/SSE transport)
 MCP_HOST=0.0.0.0
 MCP_PORT=8000
+
+# Optional: API Token Authentication (simple token-based auth)
+API_TOKENS=token1,token2,token3
+
+# Optional: GitHub OAuth (for user/org-based access control)
+GITHUB_CLIENT_ID=your_github_client_id
+GITHUB_CLIENT_SECRET=your_github_client_secret
+GITHUB_ALLOWED_ORGS=your-org-name
+GITHUB_ALLOWED_USERS=username1,username2
+
+# Optional: Logging configuration
+LOG_LEVEL=INFO
+STRUCTURED_LOGGING=false
+
+# Optional: Redis for session storage (for distributed deployments)
+REDIS_URL=redis://localhost:6379
 ```
 
 ## Usage
@@ -182,7 +212,7 @@ This mode is suitable for direct integration with MCP clients that communicate v
 Run the server with HTTP and Server-Sent Events:
 
 ```bash
-python server_http.py
+python server_mcp_http_stateful.py
 ```
 
 The server will start on `http://0.0.0.0:8000` (configurable via environment variables).
@@ -321,6 +351,89 @@ Executes a GraphQL mutation.
 }
 ```
 
+### 5. epoch_to_readable
+
+Converts Unix epoch timestamp to human-readable date/time format with timezone support.
+
+**Parameters:**
+- `epoch` (number, required): Unix epoch timestamp (seconds since January 1, 1970)
+- `format` (string, optional): strftime format string (default: `'%Y-%m-%d %H:%M:%S UTC'`)
+- `timezone` (string, optional): Timezone name (default: `'UTC'`). Examples: `'US/Eastern'`, `'Europe/London'`, `'Asia/Tokyo'`
+
+**Returns:**
+```json
+{
+  "epoch": 1703894400,
+  "readable": "2023-12-30 00:00:00 UTC",
+  "format": "%Y-%m-%d %H:%M:%S UTC",
+  "timezone": "UTC"
+}
+```
+
+### 6. ntp_time
+
+Gets accurate time from NTP (Network Time Protocol) server with optional clock offset calculation.
+
+**Parameters:**
+- `server` (string, optional): NTP server to query (default: `'dk.pool.ntp.org'`). Examples: `'time.google.com'`, `'pool.ntp.org'`
+- `include_offset` (boolean, optional): Include local clock offset calculation (default: `true`)
+
+**Returns:**
+```json
+{
+  "ntp_time": "2025-12-30 12:34:56.789 UTC",
+  "server": "dk.pool.ntp.org",
+  "local_time": "2025-12-30 12:34:56.123 UTC",
+  "offset_seconds": 0.666
+}
+```
+
+### 7. ip_info
+
+Gets IP information including timezone, location, and network details using ip-api.com (free, no API key required). Rate limit: 45 requests/minute.
+
+**Parameters:**
+- `ip` (string, optional): IP address to look up (e.g., `'8.8.8.8'`). If not provided, uses the MCP client's IP address.
+
+**Returns:**
+```json
+{
+  "ip": "8.8.8.8",
+  "country": "United States",
+  "city": "Mountain View",
+  "timezone": "America/Los_Angeles",
+  "local_time": "2025-12-30 04:34:56",
+  "isp": "Google LLC",
+  "lat": 37.386,
+  "lon": -122.0838
+}
+```
+
+### 8. web_search
+
+Searches the web using DuckDuckGo (free, no API key required). Returns search results with titles, URLs, and snippets.
+
+**Parameters:**
+- `query` (string, required): The search query string
+- `max_results` (integer, optional): Maximum number of results to return (default: 10, max: 25)
+
+**Returns:**
+```json
+{
+  "status": "success",
+  "query": "graphql best practices",
+  "results_count": 10,
+  "results": [
+    {
+      "position": 1,
+      "title": "GraphQL Best Practices",
+      "url": "https://example.com/graphql-best-practices",
+      "snippet": "Learn the best practices for designing GraphQL APIs..."
+    }
+  ]
+}
+```
+
 ## Example Workflows
 
 ### Discovering the Schema
@@ -340,12 +453,34 @@ Executes a GraphQL mutation.
 2. Execute mutations using `graphql_mutation`
 3. Always review the returned query/mutation for debugging
 
+### Time and Location Utilities
+
+1. Use `epoch_to_readable` to convert Unix timestamps to human-readable format
+2. Use `ntp_time` to get accurate network time and check clock synchronization
+3. Use `ip_info` to look up geolocation and timezone information for IP addresses
+
+### Web Research
+
+1. Use `web_search` to find documentation, tutorials, or current information
+2. Combine with GraphQL queries to enrich your data with external information
+
+## MCP System Prompts
+
+The server provides built-in system prompts for consistent LLM behavior:
+
+- **graphql-assistant**: System prompt for GraphQL API interaction assistance
+- **graphql-explorer**: System prompt for exploring and discovering GraphQL schemas
+
 ## Security Considerations
 
 - Store sensitive tokens in `.env` file (never commit to version control)
 - Use HTTPS for GraphQL endpoints in production
 - Configure appropriate authentication headers
 - Review and sanitize queries before execution in production environments
+- Enable OAuth 2.1 or API token authentication for production deployments
+- Use structured logging (`STRUCTURED_LOGGING=true`) for SIEM integration
+- Review `logs/queries.log` and `logs/logons.log` for audit trails
+- Rate limiting is enabled by default to prevent abuse
 
 ## Troubleshooting
 
