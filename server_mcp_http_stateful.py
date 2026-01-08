@@ -188,6 +188,16 @@ def log_logon(event: str, user: str = None, provider: str = None, client_ip: str
     except Exception as e:
         logger.debug(f"Failed to log logon: {e}")
 
+# Rate limit helper for programmatic use
+async def check_rate_limit(request: Request, limit_string: str):
+    """Helper to check rate limits programmatically"""
+    limiter = request.app.state.limiter
+    # Use the limiter's key_func to get the identifier
+    key = limiter._key_func(request)
+    # Check if limit is exceeded
+    if not limiter._check_request_limit(request, None, limit_string):
+        raise RateLimitExceeded(limit_string)
+
 # Server info
 SERVER_VERSION = __version__
 PROTOCOL_VERSION = MCP_PROTOCOL_VERSION
@@ -1328,11 +1338,7 @@ async def oauth_authorize(request: Request) -> Response:
     - Traditional client_id (string)
     - CIMD client_id (HTTPS URL) per draft-parecki-oauth-client-id-metadata-document
     """
-    limiter = request.app.state.limiter
-    try:
-        await limiter.hit(limiter.limit("10/minute")(lambda: None), request)  # Prevent auth spam
-    except RateLimitExceeded:
-        raise
+    await check_rate_limit(request, "10/minute")  # Prevent auth spam
     
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
@@ -1406,11 +1412,7 @@ async def oauth_token(request: Request) -> JSONResponse:
     OAuth 2.1 Token endpoint.
     Exchanges authorization code for tokens.
     """
-    limiter = request.app.state.limiter
-    try:
-        await limiter.hit(limiter.limit("20/minute")(lambda: None), request)  # Prevent token abuse
-    except RateLimitExceeded:
-        raise
+    await check_rate_limit(request, "20/minute")  # Prevent token abuse
     
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
@@ -1508,11 +1510,7 @@ async def auth_login(request: Request) -> Response:
         redirect_uri: Optional URI to redirect user after authentication
         provider: OAuth provider (default: from OAUTH_PROVIDER env var)
     """
-    limiter = request.app.state.limiter
-    try:
-        await limiter.hit(limiter.limit("10/minute")(lambda: None), request)  # Prevent auth abuse
-    except RateLimitExceeded:
-        raise
+    await check_rate_limit(request, "10/minute")  # Prevent auth abuse
     
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
@@ -1837,11 +1835,7 @@ async def health_check(request: Request) -> JSONResponse:
 
 
 async def list_tools_endpoint(request: Request) -> JSONResponse:
-    limiter = request.app.state.limiter
-    try:
-        await limiter.hit(limiter.limit("60/minute")(lambda: None), request)
-    except RateLimitExceeded:
-        raise
+    await check_rate_limit(request, "60/minute")
     
     tools = [
         {"name": "graphql_introspection", "description": "Perform GraphQL introspection"},
@@ -1858,11 +1852,7 @@ async def list_tools_endpoint(request: Request) -> JSONResponse:
 
 async def execute_tool_endpoint(request: Request) -> JSONResponse:
     """Direct tool execution endpoint for testing"""
-    limiter = request.app.state.limiter
-    try:
-        await limiter.hit(limiter.limit("30/minute")(lambda: None), request)  # Stricter for execution
-    except RateLimitExceeded:
-        raise
+    await check_rate_limit(request, "30/minute")  # Stricter for execution
     
     try:
         body = await request.json()
