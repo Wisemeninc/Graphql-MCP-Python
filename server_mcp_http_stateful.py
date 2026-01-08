@@ -1329,7 +1329,10 @@ async def oauth_authorize(request: Request) -> Response:
     - CIMD client_id (HTTPS URL) per draft-parecki-oauth-client-id-metadata-document
     """
     limiter = request.app.state.limiter
-    await limiter.check_request_limit(request, "10/minute")  # Prevent auth spam
+    try:
+        await limiter.hit(limiter.limit("10/minute")(lambda: None), request)  # Prevent auth spam
+    except RateLimitExceeded:
+        raise
     
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
@@ -1404,7 +1407,10 @@ async def oauth_token(request: Request) -> JSONResponse:
     Exchanges authorization code for tokens.
     """
     limiter = request.app.state.limiter
-    await limiter.check_request_limit(request, "20/minute")  # Prevent token abuse
+    try:
+        await limiter.hit(limiter.limit("20/minute")(lambda: None), request)  # Prevent token abuse
+    except RateLimitExceeded:
+        raise
     
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
@@ -1503,7 +1509,10 @@ async def auth_login(request: Request) -> Response:
         provider: OAuth provider (default: from OAUTH_PROVIDER env var)
     """
     limiter = request.app.state.limiter
-    await limiter.check_request_limit(request, "10/minute")  # Prevent auth abuse
+    try:
+        await limiter.hit(limiter.limit("10/minute")(lambda: None), request)  # Prevent auth abuse
+    except RateLimitExceeded:
+        raise
     
     if not OAUTH_ENABLED:
         return JSONResponse({"error": "OAuth authentication is not enabled"}, status_code=400)
@@ -1829,7 +1838,10 @@ async def health_check(request: Request) -> JSONResponse:
 
 async def list_tools_endpoint(request: Request) -> JSONResponse:
     limiter = request.app.state.limiter
-    await limiter.check_request_limit(request, "60/minute")
+    try:
+        await limiter.hit(limiter.limit("60/minute")(lambda: None), request)
+    except RateLimitExceeded:
+        raise
     
     tools = [
         {"name": "graphql_introspection", "description": "Perform GraphQL introspection"},
@@ -1847,7 +1859,10 @@ async def list_tools_endpoint(request: Request) -> JSONResponse:
 async def execute_tool_endpoint(request: Request) -> JSONResponse:
     """Direct tool execution endpoint for testing"""
     limiter = request.app.state.limiter
-    await limiter.check_request_limit(request, "30/minute")  # Stricter for execution
+    try:
+        await limiter.hit(limiter.limit("30/minute")(lambda: None), request)  # Stricter for execution
+    except RateLimitExceeded:
+        raise
     
     try:
         body = await request.json()
